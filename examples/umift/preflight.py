@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import platform
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,16 @@ EXPECTED_OPTIMIZER_KEYS = [
 ]
 ACTION_LR_KEYS = ["action2llm", "llm2action", "action_modality_embed"]
 EDGE_REVISION = "a9d944e2c6a1bf9f48b92ad16348e70c5f1836ba"
+
+
+def _fp32(value: float) -> float:
+    return struct.unpack("!f", struct.pack("!f", value))[0]
+
+
+_LR_GROUPS = {
+    "base": (1e-5, {1e-5, _fp32(1e-5)}),
+    "action": (5e-5, {5e-5, _fp32(5e-5)}),
+}
 
 
 def _get(obj: Any, dotted: str) -> Any:
@@ -129,18 +140,49 @@ def summarize_optimizer(
     missing_families = [key for key in EXPECTED_OPTIMIZER_KEYS if not any(key in name for name, _ in trainable)]
     assert not missing_families, f"optimizer parameter families absent: {missing_families}"
 
+    trainable_by_id = {id(parameter): name for name, parameter in trainable}
+    assert len(trainable_by_id) == len(trainable), "duplicate parameter object in named_parameters"
+
     lr_elements: dict[str, int] = {}
     current_lrs: list[float] = []
-    valid_lrs = {1e-5, 5e-5}
-    for group in param_groups:
+    lr_groups: list[dict[str, Any]] = []
+    optimized: set[int] = set()
+    for group_index, group in enumerate(param_groups):
         current_lrs.append(float(group["lr"]))
         # LambdaLR applies f_start=0 during construction.  initial_lr is the
         # configured peak/base LR and is therefore the value whose grouping
         # proves the 1x/5x optimizer contract.
-        base_lr = float(group.get("initial_lr", group["lr"]))
-        assert base_lr in valid_lrs, f"unexpected optimizer LR {base_lr}"
-        key = f"{base_lr:g}"
-        lr_elements[key] = lr_elements.get(key, 0) + sum(int(p.numel()) for p in group["params"])
+        actual_lr = float(group.get("initial_lr", group["lr"]))
+        matches = [name for name, (_, aliases) in _LR_GROUPS.items() if actual_lr in aliases]
+        assert len(matches) == 1, f"unexpected optimizer LR {actual_lr}"
+        canonical_group = matches[0]
+        canonical_lr = _LR_GROUPS[canonical_group][0]
+        group_elements = 0
+        for parameter in group["params"]:
+            parameter_id = id(parameter)
+            assert parameter_id in trainable_by_id, (
+                f"optimizer group {group_index} contains unknown or frozen parameter"
+            )
+            name = trainable_by_id[parameter_id]
+            assert parameter_id not in optimized, f"optimizer parameter appears more than once: {name}"
+            optimized.add(parameter_id)
+            expected_group = "action" if any(key in name for key in ACTION_LR_KEYS) else "base"
+            assert canonical_group == expected_group, (
+                f"parameter {name} expected {expected_group} LR group, got {canonical_group}"
+            )
+            group_elements += int(parameter.numel())
+        key = f"{canonical_lr:g}"
+        lr_elements[key] = lr_elements.get(key, 0) + group_elements
+        lr_groups.append({
+            "canonical_group": canonical_group,
+            "canonical_lr": canonical_lr,
+            "actual_lr": actual_lr,
+            "current_lr": current_lrs[-1],
+            "parameter_tensors": len(group["params"]),
+            "elements": group_elements,
+        })
+    missing_optimizer_params = [name for name, parameter in trainable if id(parameter) not in optimized]
+    assert not missing_optimizer_params, f"trainable params absent from optimizer: {missing_optimizer_params[:20]}"
     assert set(lr_elements) == {"1e-05", "5e-05"}, f"expected base/action LR groups, got {lr_elements}"
 
     if finite_check is not None:
@@ -151,6 +193,7 @@ def summarize_optimizer(
         "trainable_tensors": len(trainable),
         "trainable_elements": sum(int(p.numel()) for _, p in trainable),
         "lr_group_elements": lr_elements,
+        "lr_groups": lr_groups,
         "current_lrs": current_lrs,
     }
 

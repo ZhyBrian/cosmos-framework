@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import struct
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,13 +190,33 @@ def test_optimizer_report_uses_scheduler_base_lr_after_zero_start() -> None:
     ]
     base_params = [p for name, p in params if not any(key in name for key in preflight.ACTION_LR_KEYS)]
     action_params = [p for name, p in params if any(key in name for key in preflight.ACTION_LR_KEYS)]
+    fp32 = lambda value: struct.unpack("!f", struct.pack("!f", value))[0]
     groups = [
-        {"lr": 0.0, "initial_lr": 1e-5, "params": base_params},
-        {"lr": 0.0, "initial_lr": 5e-5, "params": action_params},
+        {"lr": 0.0, "initial_lr": fp32(1e-5), "params": base_params},
+        {"lr": 0.0, "initial_lr": fp32(5e-5), "params": action_params},
     ]
     report = preflight.summarize_optimizer(params, groups)
     assert report["lr_group_elements"] == {"1e-05": 16, "5e-05": 12}
     assert report["current_lrs"] == [0.0, 0.0]
+    assert [group["canonical_group"] for group in report["lr_groups"]] == ["base", "action"]
+    assert [group["actual_lr"] for group in report["lr_groups"]] == [fp32(1e-5), fp32(5e-5)]
+
+
+def test_optimizer_report_rejects_parameter_in_wrong_lr_group() -> None:
+    params = [
+        (f"{key}.weight", ns(numel=lambda: 4, requires_grad=True, grad=None))
+        for key in preflight.EXPECTED_OPTIMIZER_KEYS
+    ]
+    base_params = [p for name, p in params if not any(key in name for key in preflight.ACTION_LR_KEYS)]
+    action_params = [p for name, p in params if any(key in name for key in preflight.ACTION_LR_KEYS)]
+    misplaced = action_params.pop()
+    base_params.append(misplaced)
+    groups = [
+        {"lr": 1e-5, "params": base_params},
+        {"lr": 5e-5, "params": action_params},
+    ]
+    with pytest.raises(AssertionError, match="expected action LR group"):
+        preflight.summarize_optimizer(params, groups)
 
 
 def test_checkpoint_source_distinguishes_warmstart_and_resume() -> None:
