@@ -10,6 +10,7 @@ import dataclasses
 import hashlib
 import inspect
 import json
+import math
 import os
 import pickle
 import random
@@ -102,6 +103,32 @@ def _optimizer_record(model: Any, optimizer: Any) -> dict[str, Any]:
     return {"groups": groups}
 
 
+def _gradient_record(model: Any) -> dict[str, Any]:
+    import torch
+
+    parameters = []
+    total_sq = 0.0
+    total_abs = 0.0
+    for name, parameter in model.net.named_parameters():
+        if parameter.grad is None:
+            continue
+        grad = parameter.grad.to_local() if hasattr(parameter.grad, "to_local") else parameter.grad
+        grad_fp64 = grad.detach().double()
+        sq = grad_fp64.square().sum()
+        absolute = grad_fp64.abs().sum()
+        total_sq += float(sq)
+        total_abs += float(absolute)
+        parameters.append({
+            "name": name,
+            "gradient": _tensor_record(parameter.grad),
+            "l2": float(sq.sqrt()),
+            "max_abs": float(grad_fp64.abs().max()),
+            "sum_abs": float(absolute),
+            "finite": bool(torch.isfinite(grad).all()),
+        })
+    return {"parameters": parameters, "local_l2": math.sqrt(total_sq), "local_sum_abs": total_abs}
+
+
 def _wrap_method(cls: type, name: str, capture: Callable[[tuple[Any, ...], dict[str, Any], Any], None]) -> None:
     original = getattr(cls, name)
 
@@ -115,6 +142,7 @@ def _wrap_method(cls: type, name: str, capture: Callable[[tuple[Any, ...], dict[
 
 
 def install_diagnostics() -> None:
+    import cosmos_framework.callbacks.grad_clip as grad_clip_module
     from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
     from cosmos_framework.trainer import ImaginaireTrainer
 
@@ -176,6 +204,67 @@ def install_diagnostics() -> None:
         return result
 
     OmniMoTModel.training_step = training_step
+
+    backward_slot = 0
+    original_after_backward = OmniMoTModel.on_after_backward
+
+    def after_backward(self: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal backward_slot
+        result = original_after_backward(self, *args, **kwargs)
+        if getattr(self, "_umift_diag_backward_active", False):
+            _write({"event": "backward", "iteration": TRACE_ITERATION, "micro_slot": backward_slot,
+                    "cumulative_raw_gradient": _gradient_record(self), "rng_after": _rng_record()})
+            backward_slot += 1
+        return result
+
+    OmniMoTModel.on_after_backward = after_backward
+
+    original_trainer_step = ImaginaireTrainer.training_step
+
+    def trainer_step(self: Any, model_ddp: Any, *args: Any, **kwargs: Any) -> Any:
+        bound = inspect.signature(original_trainer_step).bind(self, model_ddp, *args, **kwargs)
+        active = bound.arguments.get("iteration", 0) == TRACE_ITERATION
+        model_ddp._umift_diag_backward_active = active
+        try:
+            return original_trainer_step(self, model_ddp, *args, **kwargs)
+        finally:
+            model_ddp._umift_diag_backward_active = False
+
+    ImaginaireTrainer.training_step = trainer_step
+
+    norm_capture: dict[str, Any] = {}
+    norm_active = False
+    original_total_norm = grad_clip_module._total_norm_by_mesh
+
+    def total_norm(*args: Any, **kwargs: Any) -> Any:
+        result = original_total_norm(*args, **kwargs)
+        if norm_active:
+            norm_capture["total"] = _record(result[0])
+            norm_capture["total_value"] = float(result[0])
+            norm_capture["per_mesh"] = _record(result[1])
+        return result
+
+    grad_clip_module._total_norm_by_mesh = total_norm
+    original_grad_clip = grad_clip_module.GradClip.on_before_optimizer_step
+
+    def grad_clip(self: Any, model: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal norm_active
+        bound = inspect.signature(original_grad_clip).bind(self, model, *args, **kwargs)
+        iteration = bound.arguments.get("iteration", 0)
+        if iteration != TRACE_ITERATION:
+            return original_grad_clip(self, model, *args, **kwargs)
+        norm_capture.clear()
+        before = _gradient_record(model)
+        norm_active = True
+        try:
+            result = original_grad_clip(self, model, *args, **kwargs)
+        finally:
+            norm_active = False
+        _write({"event": "grad_clip", "iteration": iteration, "before": before,
+                "computed_norm": dict(norm_capture), "after": _gradient_record(model)})
+        return result
+
+    grad_clip_module.GradClip.on_before_optimizer_step = grad_clip
 
     original_optimizer_step = ImaginaireTrainer._optimizer_step
 

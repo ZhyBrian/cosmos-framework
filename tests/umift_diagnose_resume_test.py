@@ -61,3 +61,19 @@ def test_tensor_record_handles_scalar_and_bfloat16() -> None:
             return bf16
 
     assert diag._tensor_record(LocalTensor())["sha256"] == diag._tensor_record(bf16)["sha256"]
+
+
+def test_gradient_record_reports_hash_and_absolute_norms() -> None:
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    parameter.grad = torch.tensor([3.0, -4.0])
+
+    class Net:
+        def named_parameters(self):
+            return [("weight", parameter)]
+
+    report = diag._gradient_record(type("Model", (), {"net": Net()})())
+    assert report["local_l2"] == 5.0
+    assert report["local_sum_abs"] == 7.0
+    assert report["parameters"][0]["max_abs"] == 4.0
+    assert report["parameters"][0]["finite"] is True
