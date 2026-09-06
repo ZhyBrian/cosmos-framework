@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,15 +21,76 @@ def ns(**kwargs):
     return SimpleNamespace(**kwargs)
 
 
-def test_a40_env_is_scoped_to_fixed_venv_and_explicit_gpu_selection() -> None:
+def test_a40_env_activates_fixed_conda_env_and_checks_actual_python() -> None:
     source = ENV_PATH.read_text(encoding="utf-8")
-    assert "/data/cosmos_envs/umi_edge_e1_py313" in source
+    assert '_umift_conda_sh="$_umift_conda_root/etc/profile.d/conda.sh"' in source
+    assert "conda activate \"$_umift_env\"" in source
+    assert "_umift_env=/data/miniconda3/envs/cosmos_edge_e1" in source
+    assert '"${CONDA_PREFIX-}" != "$_umift_env"' in source
+    assert "command -v python" in source
+    assert "os.path.realpath(sys.executable)" in source
     assert '0|0,1,2,3)' in source
     assert 'CURAND_HOME="$_umift_site/nvidia/curand"' in source
     assert 'CUDNN_HOME="$_umift_site/nvidia/cudnn"' in source
     assert 'NVRTC_HOME="$_umift_site/nvidia/cuda_nvrtc"' in source
     assert 'I4_ATTN_BACKENDS="${I4_ATTN_BACKENDS:-natten}"' in source
     assert "unset I4_ATTN_BACKENDS_MULTIDIM" in source
+    assert "VIRTUAL_ENV" not in source
+    assert "UV_PYTHON_" not in source
+    assert "/data/cosmos_envs" not in source
+
+
+def test_a40_env_uses_only_cosmos_cache_namespaces() -> None:
+    source = ENV_PATH.read_text(encoding="utf-8")
+    assert "CONDA_PKGS_DIRS=/data/cosmos_conda/pkgs" in source
+    assert "PIP_CACHE_DIR=/data/cosmos_conda/cache/pip" in source
+    assert "UV_CACHE_DIR=/data/cosmos_conda/cache/uv" in source
+    assert "HF_HOME=/data/cosmos_models/cache/huggingface" in source
+    assert "TMPDIR=/data/cosmos_runs/tmp" in source
+
+
+def test_a40_env_checks_conda_prefix_python_and_component_paths(tmp_path: Path) -> None:
+    conda_root = tmp_path / "miniconda3"
+    env = conda_root / "envs/cosmos_edge_e1"
+    (conda_root / "etc/profile.d").mkdir(parents=True)
+    (env / "bin").mkdir(parents=True)
+    for component in ("curand", "cudnn", "cuda_nvrtc"):
+        (env / f"lib/python3.13/site-packages/nvidia/{component}").mkdir(parents=True)
+    (conda_root / "etc/profile.d/conda.sh").write_text(
+        'conda() { [[ "$1" == activate ]] || return 9; export CONDA_PREFIX="$2"; export PATH="$2/bin:$PATH"; }\n',
+        encoding="utf-8",
+    )
+    python = env / "bin/python"
+    python.write_text(f"#!/usr/bin/env bash\necho '{env}/bin/python3.13'\n", encoding="utf-8")
+    python.chmod(0o755)
+    rewritten = tmp_path / "a40_env.sh"
+    source = ENV_PATH.read_text(encoding="utf-8").replace("/data/miniconda3", str(conda_root))
+    for original, replacement in (
+        ("/data/cosmos_conda", str(tmp_path / "cosmos_conda")),
+        ("/data/cosmos_models", str(tmp_path / "cosmos_models")),
+        ("/data/cosmos_runs", str(tmp_path / "cosmos_runs")),
+    ):
+        source = source.replace(original, replacement)
+    rewritten.write_text(source, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-c", f'export CUDA_VISIBLE_DEVICES=0; source "{rewritten}" && printf "%s" "$CONDA_PREFIX"'],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(env)
+
+    wrong_conda = conda_root / "etc/profile.d/conda.sh"
+    wrong_conda.write_text(
+        'conda() { export CONDA_PREFIX="/outside/wrong"; export PATH="$2/bin:$PATH"; }\n', encoding="utf-8"
+    )
+    rejected = subprocess.run(
+        ["bash", "-c", f'export CUDA_VISIBLE_DEVICES=0; source "{rewritten}" && echo SHOULD_NOT_RUN'],
+        capture_output=True, text=True,
+    )
+    assert rejected.returncode == 2
+    assert "wrong Conda environment active" in rejected.stderr
+    assert "SHOULD_NOT_RUN" not in rejected.stdout
+
 
 
 def test_local_artifacts_reject_remote_or_ambiguous_sources(tmp_path: Path) -> None:
