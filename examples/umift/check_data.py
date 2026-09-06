@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
+
+
+SCHEMA_VERSION = 1
+DATASET_SEED = 42
+_ROOT_METADATA_FILES = (".zattrs", ".zgroup", "zarr.json")
 
 
 def _one(value: Any) -> Any:
@@ -112,6 +118,34 @@ def _build_loader(config: Any) -> Any:
     return instantiate(config.dataloader_train)
 
 
+def _dataset_root_metadata_sha256(dataset: Path) -> str | None:
+    """Hash only canonical Zarr root metadata, never array chunks."""
+    metadata = [dataset / name for name in _ROOT_METADATA_FILES if (dataset / name).is_file()]
+    if not metadata:
+        return None
+    digest = hashlib.sha256()
+    for path in metadata:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _evidence_fields(args: argparse.Namespace, *, world_size: int) -> dict[str, Any]:
+    dataset = args.dataset.resolve()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "samples": int(args.samples),
+        "resume_microbatch": int(args.resume_microbatch),
+        "seed": DATASET_SEED,
+        "dataset": str(dataset),
+        "dataset_root_metadata_sha256": _dataset_root_metadata_sha256(dataset),
+        "stage": str(args.stage),
+        "world_size": int(world_size),
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     import torch
 
@@ -146,7 +180,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if world_size > 1 and args.stage != "smoke":
         sequences = [report["sample_ids"] for report in reports]
         assert len({json.dumps(sequence) for sequence in sequences}) == world_size, "rank streams are not distinct"
-    return {"ranks": reports}
+    return {**_evidence_fields(args, world_size=world_size), "ranks": reports}
 
 
 def main(argv: list[str] | None = None) -> int:

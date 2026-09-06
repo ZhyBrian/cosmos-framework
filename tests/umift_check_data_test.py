@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -14,6 +15,31 @@ SPEC = importlib.util.spec_from_file_location("umift_check_data", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_evidence_fields_come_from_executed_arguments(tmp_path) -> None:
+    dataset = tmp_path / "relative-parent" / "dataset.zarr"
+    dataset.mkdir(parents=True)
+    root_metadata = b'{"zarr_format":2}'
+    (dataset / ".zgroup").write_bytes(root_metadata)
+    digest = hashlib.sha256()
+    digest.update(b".zgroup\0")
+    digest.update(root_metadata)
+    digest.update(b"\0")
+    args = SimpleNamespace(dataset=dataset, samples=37, resume_microbatch=19, stage="overfit")
+
+    report = MODULE._evidence_fields(args, world_size=4)
+
+    assert report == {
+        "schema_version": 1,
+        "samples": 37,
+        "resume_microbatch": 19,
+        "seed": 42,
+        "dataset": str(dataset.resolve()),
+        "dataset_root_metadata_sha256": digest.hexdigest(),
+        "stage": "overfit",
+        "world_size": 4,
+    }
 
 
 def test_validate_batch_checks_fd_masks_and_action_spaces() -> None:
