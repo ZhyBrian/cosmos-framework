@@ -22,6 +22,9 @@ from examples.umift.protocol import derive_noise_seed, persistence_prediction
 
 Variant = Literal["A", "Z", "S"]
 _WINDOW_ID = re.compile(r"^episode_(?P<episode>\d+):s=(?P<start>\d+)$")
+E0_OVERFIT_EPISODE = 0
+E0_OVERFIT_STARTS = (0, 64, 128, 192)
+_E0_OVERFIT_METHODS = {"B-VAE", "B0", "E1-A"}
 
 
 def _numpy(value: Any) -> np.ndarray:
@@ -258,10 +261,37 @@ def _iter_n(dataset: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
         yield next(iterator)
 
 
+def resolve_dataset_protocol(split: str, stage: str) -> tuple[str, str]:
+    """Map the closed E0 evaluation split onto the adapter's training subset."""
+    if split == "overfit":
+        return "train", "overfit"
+    return split, stage
+
+
+def iter_evaluation_windows(dataset: Any, split: str) -> Iterable[dict[str, Any]]:
+    """Enumerate an evaluation split without exposing arbitrary training windows."""
+    if split != "overfit":
+        yield from _iter_n(dataset)
+        return
+    for start in E0_OVERFIT_STARTS:
+        sample = dataset.get_window(E0_OVERFIT_EPISODE, start)
+        actual = (int(sample["episode_id"]), int(sample["window_start"]))
+        expected = (E0_OVERFIT_EPISODE, start)
+        if actual != expected:
+            raise ValueError(f"overfit dataset returned unexpected window {actual}; expected {expected}")
+        yield sample
+
+
 def validate_sampling_protocol(split: str, method: str, sampling_seeds: list[int]) -> None:
     if len(sampling_seeds) != len(set(sampling_seeds)):
         raise ValueError("sampling seeds must be unique")
     stochastic = method not in {"B-Persistence", "B-VAE"}
+    if split == "overfit":
+        if method not in _E0_OVERFIT_METHODS:
+            raise ValueError("overfit split only supports B-VAE, B0, and E1-A")
+        if sampling_seeds != [0]:
+            raise ValueError("overfit E0 evaluation requires sampling seed [0]")
+        return
     if split == "history" and stochastic and sampling_seeds != [0, 1, 2]:
         raise ValueError("history stochastic evaluation requires sampling seeds [0, 1, 2]")
     if split == "dev" and stochastic and sampling_seeds != [0]:
@@ -294,10 +324,11 @@ def run_cli(args: argparse.Namespace) -> None:
         model, resolved, load_evidence = load_edge_fd_model(args.sft_toml, args.checkpoint)
     tokenizer_config = None if resolved is None else resolved.model.config.vlm_config.tokenizer
     max_action_dim = 64 if resolved is None else int(resolved.model.config.max_action_dim)
+    dataset_split, dataset_stage = resolve_dataset_protocol(args.split, args.stage)
     dataset = get_umift_zarr_sft_dataset(
         str(args.zarr),
-        split=args.split,
-        stage=args.stage,
+        split=dataset_split,
+        stage=dataset_stage,
         seed=42,
         resolution="256",
         fps=15.0,
@@ -307,7 +338,7 @@ def run_cli(args: argparse.Namespace) -> None:
     )
     pairs = _load_pairs(args.pairs)
     manifest_rows: list[dict[str, Any]] = []
-    for original in _iter_n(dataset):
+    for original in iter_evaluation_windows(dataset, args.split):
         window_id = _window_id(original)
         sample = original
         if method == "E1-Z":
@@ -381,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sft-toml", type=Path)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--zarr", type=Path, required=True)
-    parser.add_argument("--split", choices=["dev", "history"], required=True)
+    parser.add_argument("--split", choices=["dev", "history", "overfit"], required=True)
     parser.add_argument("--stage", choices=["smoke", "overfit", "e1"], default="e1")
     parser.add_argument(
         "--method",

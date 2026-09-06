@@ -5,11 +5,15 @@ import numpy as np
 import pytest
 
 from examples.umift.infer import (
+    E0_OVERFIT_STARTS,
+    _window_id,
     condition_only_video,
     compare_checkpoint_keys,
     decoded_video_to_thwc01,
     make_action_variant,
     run_forward_dynamics,
+    iter_evaluation_windows,
+    resolve_dataset_protocol,
     validate_sampling_protocol,
     validate_checkpoint_path,
     validate_fd_sample,
@@ -158,3 +162,54 @@ def test_model_launch_requires_only_gpu_zero_through_three_visible() -> None:
     validate_launch_environment({"CUDA_VISIBLE_DEVICES": "0,1,2,3", "WORLD_SIZE": "4"})
     with pytest.raises(ValueError, match="CUDA_VISIBLE_DEVICES=0,1,2,3"):
         validate_launch_environment({"CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7", "WORLD_SIZE": "4"})
+
+
+def test_overfit_split_maps_only_to_training_episode_and_overfit_stage() -> None:
+    assert resolve_dataset_protocol("overfit", "e1") == ("train", "overfit")
+    assert resolve_dataset_protocol("dev", "smoke") == ("dev", "smoke")
+    assert resolve_dataset_protocol("history", "e1") == ("history", "e1")
+
+
+def test_overfit_enumeration_uses_exact_four_frozen_windows() -> None:
+    calls: list[tuple[int, int]] = []
+
+    class Dataset:
+        def get_window(self, episode: int, start: int) -> dict:
+            calls.append((episode, start))
+            return {"episode_id": episode, "window_start": start}
+
+    windows = list(iter_evaluation_windows(Dataset(), "overfit"))
+
+    assert E0_OVERFIT_STARTS == (0, 64, 128, 192)
+    assert calls == [(0, 0), (0, 64), (0, 128), (0, 192)]
+    assert [(row["episode_id"], row["window_start"]) for row in windows] == calls
+    assert [_window_id(row) for row in windows] == [
+        "episode_0:s=0",
+        "episode_0:s=64",
+        "episode_0:s=128",
+        "episode_0:s=192",
+    ]
+
+
+def test_overfit_enumeration_rejects_dataset_window_identity_leakage() -> None:
+    class Dataset:
+        def get_window(self, episode: int, start: int) -> dict:
+            return {"episode_id": 1, "window_start": start}
+
+    with pytest.raises(ValueError, match="overfit dataset returned unexpected window"):
+        list(iter_evaluation_windows(Dataset(), "overfit"))
+
+
+@pytest.mark.parametrize("method", ["B-VAE", "B0", "E1-A"])
+def test_overfit_protocol_accepts_only_seed_zero_for_e0_methods(method: str) -> None:
+    validate_sampling_protocol("overfit", method, [0])
+    with pytest.raises(ValueError, match=r"sampling seed \[0\]"):
+        validate_sampling_protocol("overfit", method, [1])
+    with pytest.raises(ValueError, match=r"sampling seed \[0\]"):
+        validate_sampling_protocol("overfit", method, [0, 1])
+
+
+def test_overfit_protocol_does_not_open_arbitrary_training_evaluation() -> None:
+    for method in ("B-Persistence", "E1-Z", "E1-S"):
+        with pytest.raises(ValueError, match="only supports B-VAE, B0, and E1-A"):
+            validate_sampling_protocol("overfit", method, [0])
