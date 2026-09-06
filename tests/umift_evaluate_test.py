@@ -15,6 +15,7 @@ from examples.umift.evaluate import (
     make_physical_zero_action,
     persistence_prediction,
     prepare_model_actions,
+    score_manifest,
     select_session_previews,
     sparse_window_starts,
 )
@@ -190,6 +191,39 @@ def test_single_seed_nested_results_are_preserved_exactly() -> None:
     assert collapsed["horizons"] == row["horizons"]
     assert collapsed["temporal"] == row["temporal"]
     assert collapsed["reconstructed_i0"] == row["reconstructed_i0"]
+
+
+def test_score_manifest_preserves_and_seed_averages_all_16_per_frame_metrics(
+    tmp_path: Path,
+) -> None:
+    truth = _video([0.0] * 17)
+    truth_path = tmp_path / "truth.npy"
+    np.save(truth_path, truth)
+    records = []
+    for seed, multiplier in enumerate((1.0, 2.0, 3.0)):
+        prediction = _video([0.0] + [multiplier * index / 48.0 for index in range(1, 17)])
+        prediction_path = tmp_path / f"prediction_{seed}.npy"
+        np.save(prediction_path, prediction)
+        records.append(
+            {
+                "window_id": "w0",
+                "raw_session": "session0",
+                "sampling_seed": seed,
+                "truth_path": truth_path.name,
+                "prediction_path": prediction_path.name,
+            }
+        )
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in records))
+
+    result = score_manifest(manifest, include_lpips=False)
+
+    assert len(result["samples"]) == 3
+    assert all(len(sample["per_frame"]) == 16 for sample in result["samples"])
+    assert len(result["windows"][0]["per_frame"]) == 16
+    for index, frame in enumerate(result["windows"][0]["per_frame"], start=1):
+        expected_mse = (14.0 / 3.0) * (index / 48.0) ** 2
+        assert frame["mse"] == pytest.approx(expected_mse)
 
 
 def test_already_normalized_actions_are_not_normalized_twice() -> None:

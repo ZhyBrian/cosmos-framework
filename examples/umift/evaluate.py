@@ -188,7 +188,7 @@ def collapse_sampling_seeds(rows: Iterable[dict[str, Any]]) -> list[dict[str, An
         first["metrics"] = {
             name: float(np.mean([row["metrics"][name] for row in members])) for name in sorted(metric_names)
         }
-        for block in ("last", "horizons", "temporal", "reconstructed_i0"):
+        for block in ("per_frame", "last", "horizons", "temporal", "reconstructed_i0"):
             present = [block in row for row in members]
             if any(present) and not all(present):
                 raise ValueError(f"window {window_id!r} has inconsistent {block!r} blocks across seeds")
@@ -323,6 +323,7 @@ def score_manifest(manifest_path: str | Path, *, include_lpips: bool) -> dict[st
             {
                 **record,
                 "metrics": result["mean"],
+                "per_frame": result["per_frame"],
                 "last": result["last"],
                 "horizons": result["horizons"],
                 "temporal": result["temporal"],
