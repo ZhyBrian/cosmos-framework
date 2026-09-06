@@ -11,10 +11,11 @@ set -uo pipefail
 
 TOML_FILE="examples/toml/sft_config/action_fd_umift_edge.toml"
 : "${DATASET_PATH:=/data/cosmos_datasets/umift_us_all_source_308f4d46.zarr}"
-: "${BASE_CHECKPOINT_PATH:=/data/cosmos-checkpoints/Cosmos3-Edge-dcp}"
-: "${WAN_VAE_PATH:=/data/cosmos-checkpoints/Cosmos3-Edge/Wan2.2_VAE.pth}"
-: "${EDGE_HF_SNAPSHOT_PATH:=/data/cosmos-checkpoints/huggingface/hub/models--nvidia--Cosmos3-Edge/snapshots/a9d944e2c6a1bf9f48b92ad16348e70c5f1836ba}"
-: "${OUTPUT_ROOT:=/data/cosmos_outputs/umift_edge_fd}"
+: "${BASE_CHECKPOINT_PATH:=/data/cosmos_models/Cosmos3-Edge-DCP-a9d944e}"
+: "${WAN_VAE_PATH:=/data/cosmos_models/Wan2.2-VAE-921dbaf/Wan2.2_VAE.pth}"
+: "${EDGE_HF_SNAPSHOT_PATH:=/data/cosmos_models/Cosmos3-Edge/snapshots/a9d944e2c6a1bf9f48b92ad16348e70c5f1836ba}"
+: "${OUTPUT_ROOT:=/data/cosmos_runs/umift_edge_fd}"
+IMAGINAIRE_OUTPUT_ROOT="$OUTPUT_ROOT"
 : "${NPROC_PER_NODE:=4}"
 : "${STAGE:=e1}"
 : "${RUN_MODE:=warmstart}"
@@ -43,7 +44,7 @@ case "$RUN_MODE" in
     *) echo "ERROR: RUN_MODE must be warmstart or resume; got: $RUN_MODE" >&2; exit 2 ;;
 esac
 
-export DATASET_PATH BASE_CHECKPOINT_PATH WAN_VAE_PATH EDGE_HF_SNAPSHOT_PATH OUTPUT_ROOT NPROC_PER_NODE
+export DATASET_PATH BASE_CHECKPOINT_PATH WAN_VAE_PATH EDGE_HF_SNAPSHOT_PATH OUTPUT_ROOT IMAGINAIRE_OUTPUT_ROOT NPROC_PER_NODE
 export UMIFT_STAGE="$STAGE" I4_ATTN_BACKENDS
 
 TAIL_OVERRIDES=(

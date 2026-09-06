@@ -7,7 +7,10 @@ the data-preparation host, where Hydra/Transformers/CUDA dependencies are absent
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tomllib
 
 
@@ -108,3 +111,41 @@ def test_toml_and_launcher_expose_safe_stage_profiles() -> None:
     assert 'I4_ATTN_BACKENDS_MULTIDIM' not in launcher
     assert 'EDGE_REVISION="a9d944e2c6a1bf9f48b92ad16348e70c5f1836ba"' in launcher
     assert 'basename "$EDGE_HF_SNAPSHOT_PATH"' in launcher
+
+
+def test_launcher_uses_cosmos_paths_and_output_root_for_resume(tmp_path: Path) -> None:
+    sandbox = tmp_path / "examples"
+    sandbox.mkdir()
+    shutil.copy2(LAUNCHER, sandbox / LAUNCHER.name)
+    (sandbox / "_sft_launcher_common.sh").write_text(
+        'printf "OUTPUT=%s\\nIMAGINAIRE=%s\\n" "$OUTPUT_ROOT" "$IMAGINAIRE_OUTPUT_ROOT"\n',
+        encoding="utf-8",
+    )
+
+    revision = "a9d944e2c6a1bf9f48b92ad16348e70c5f1836ba"
+    snapshot = tmp_path / revision
+    snapshot.mkdir()
+    output = tmp_path / "cosmos_runs/umift_edge_fd"
+    wrong_output = tmp_path / "stale_output"
+    wrong_latest = wrong_output / "cosmos3_action_fd_umift/action_sft/action_fd_umift_edge_e1/checkpoints/latest_checkpoint.txt"
+    wrong_latest.parent.mkdir(parents=True)
+    wrong_latest.write_text("iter_000000250\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "OUTPUT_ROOT": str(output),
+        "IMAGINAIRE_OUTPUT_ROOT": str(wrong_output),
+        "EDGE_HF_SNAPSHOT_PATH": str(snapshot),
+        "RUN_MODE": "resume",
+    }
+
+    rejected = subprocess.run(["bash", str(sandbox / LAUNCHER.name)], env=env, capture_output=True, text=True)
+    assert rejected.returncode == 2
+    assert f"no same-job checkpoint exists: {output}" in rejected.stderr
+
+    correct_latest = output / "cosmos3_action_fd_umift/action_sft/action_fd_umift_edge_e1/checkpoints/latest_checkpoint.txt"
+    correct_latest.parent.mkdir(parents=True)
+    correct_latest.write_text("iter_000000250\n", encoding="utf-8")
+    accepted = subprocess.run(["bash", str(sandbox / LAUNCHER.name)], env=env, capture_output=True, text=True)
+    assert accepted.returncode == 0, accepted.stderr
+    assert f"OUTPUT={output}" in accepted.stdout
+    assert f"IMAGINAIRE={output}" in accepted.stdout

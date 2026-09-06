@@ -48,6 +48,15 @@ def test_a40_env_uses_only_cosmos_cache_namespaces() -> None:
     assert "UV_CACHE_DIR=/data/cosmos_conda/cache/uv" in source
     assert "HF_HOME=/data/cosmos_models/cache/huggingface" in source
     assert "TMPDIR=/data/cosmos_runs/tmp" in source
+    assert (
+        'EDGE_HF_SNAPSHOT_PATH="${EDGE_HF_SNAPSHOT_PATH:-/data/cosmos_models/Cosmos3-Edge/snapshots/'
+        'a9d944e2c6a1bf9f48b92ad16348e70c5f1836ba}"' in source
+    )
+    assert (
+        'WAN_VAE_PATH="${WAN_VAE_PATH:-/data/cosmos_models/Wan2.2-VAE-921dbaf/Wan2.2_VAE.pth}"'
+        in source
+    )
+    assert "BASE_CHECKPOINT_PATH" not in source
 
 
 def test_a40_env_checks_conda_prefix_python_and_component_paths(tmp_path: Path) -> None:
