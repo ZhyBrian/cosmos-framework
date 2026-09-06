@@ -122,9 +122,11 @@ def evaluate_video_pair(
     predicted_for_diff = np.concatenate([truth[:1], prediction[1:]], axis=0)
     true_diff = np.diff(truth, axis=0)
     predicted_diff = np.diff(predicted_for_diff, axis=0)
+    temporal_error = true_diff.astype(np.float64) - predicted_diff.astype(np.float64)
     temporal_per_frame = np.mean(
-        np.square(true_diff.astype(np.float64) - predicted_diff.astype(np.float64)), axis=(1, 2, 3)
+        np.square(temporal_error), axis=(1, 2, 3)
     )
+    temporal_per_frame_l1 = np.sum(np.abs(temporal_error), axis=(1, 2, 3))
     return {
         "frame_indices": list(range(1, 17)),
         "per_frame": frame_rows,
@@ -134,9 +136,39 @@ def evaluate_video_pair(
         "temporal": {
             "per_frame_mse": temporal_per_frame.astype(float).tolist(),
             "mean_mse": float(temporal_per_frame.mean()),
+            "per_frame_l1": temporal_per_frame_l1.astype(float).tolist(),
+            "mean_l1": float(temporal_per_frame_l1.sum() / 16.0),
         },
         "reconstructed_i0": _pixel_metrics(truth[0], prediction[0]),
     }
+
+
+def _mean_numeric_tree(values: list[Any], *, path: str) -> Any:
+    if len(values) == 1:
+        return values[0]
+    first = values[0]
+    if isinstance(first, dict):
+        expected_keys = set(first)
+        if any(not isinstance(value, dict) or set(value) != expected_keys for value in values[1:]):
+            raise ValueError(f"incompatible dictionary keys while averaging {path}")
+        return {
+            key: _mean_numeric_tree([value[key] for value in values], path=f"{path}.{key}")
+            for key in first
+        }
+    if isinstance(first, list):
+        expected_length = len(first)
+        if any(not isinstance(value, list) or len(value) != expected_length for value in values[1:]):
+            raise ValueError(f"incompatible list lengths while averaging {path}")
+        return [
+            _mean_numeric_tree([value[index] for value in values], path=f"{path}[{index}]")
+            for index in range(expected_length)
+        ]
+    numeric_types = (int, float, np.integer, np.floating)
+    if isinstance(first, bool) or any(
+        isinstance(value, bool) or not isinstance(value, numeric_types) for value in values
+    ):
+        raise ValueError(f"non-numeric value while averaging {path}")
+    return sum(float(value) for value in values) / len(values)
 
 
 def collapse_sampling_seeds(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -156,6 +188,14 @@ def collapse_sampling_seeds(rows: Iterable[dict[str, Any]]) -> list[dict[str, An
         first["metrics"] = {
             name: float(np.mean([row["metrics"][name] for row in members])) for name in sorted(metric_names)
         }
+        for block in ("last", "horizons", "temporal", "reconstructed_i0"):
+            present = [block in row for row in members]
+            if any(present) and not all(present):
+                raise ValueError(f"window {window_id!r} has inconsistent {block!r} blocks across seeds")
+            if all(present):
+                first[block] = _mean_numeric_tree(
+                    [row[block] for row in members], path=f"window {window_id}.{block}"
+                )
         collapsed.append(first)
     return collapsed
 

@@ -35,6 +35,8 @@ def test_perfect_future_ignores_a_wrong_reconstructed_condition_frame() -> None:
     assert result["mean"]["mse"] == 0.0
     assert math.isinf(result["mean"]["psnr"])
     assert result["mean"]["ssim"] == pytest.approx(1.0)
+    assert result["temporal"]["mean_l1"] == 0.0
+    assert result["temporal"]["per_frame_l1"] == [0.0] * 16
 
 
 def test_temporal_error_uses_true_i0_for_the_first_predicted_difference() -> None:
@@ -46,6 +48,23 @@ def test_temporal_error_uses_true_i0_for_the_first_predicted_difference() -> Non
 
     assert result["temporal"]["mean_mse"] == 0.0
     assert result["temporal"]["per_frame_mse"][0] == 0.0
+    assert result["temporal"]["mean_l1"] == 0.0
+    assert result["temporal"]["per_frame_l1"][0] == 0.0
+
+
+def test_temporal_l1_sums_pixels_and_channels_before_averaging_frames() -> None:
+    truth = np.zeros((17, 3, 3, 1), dtype=np.float32)
+    prediction = truth.copy()
+    prediction[0, 0, 0, 0] = 1.0  # Reconstructed I0 must not enter the temporal metric.
+    prediction[1, 0, 0, 0] = 0.5
+
+    result = evaluate_video_pair(truth, prediction)
+
+    assert result["temporal"]["per_frame_l1"] == [0.5, 0.5] + [0.0] * 14
+    assert result["temporal"]["mean_l1"] == pytest.approx(1.0 / 16.0)
+    assert result["temporal"]["mean_l1"] != pytest.approx(
+        result["temporal"]["mean_mse"]
+    )
 
 
 def test_one_frame_misalignment_is_detected() -> None:
@@ -102,6 +121,75 @@ def test_sampling_seeds_are_averaged_per_window_before_session_weighting() -> No
     windows = collapse_sampling_seeds(rows)
 
     assert aggregate_session_equal(windows)["overall"]["lpips"] == 5.0
+
+
+def test_nested_results_are_averaged_across_seeds_before_session_weighting() -> None:
+    rows = []
+    for seed, value in enumerate((1.0, 3.0, 8.0)):
+        rows.append(
+            {
+                "window_id": "w0",
+                "raw_session": "a",
+                "sampling_seed": seed,
+                "metrics": {"lpips": value},
+                "last": {"lpips": value + 1.0},
+                "horizons": {"4": {"lpips": value + 2.0}},
+                "temporal": {
+                    "per_frame_mse": [value, value + 1.0],
+                    "mean_mse": value + 0.5,
+                    "per_frame_l1": [2.0 * value, 2.0 * value + 1.0],
+                    "mean_l1": 2.0 * value + 0.5,
+                },
+                "reconstructed_i0": {"mse": value + 3.0},
+            }
+        )
+
+    window = collapse_sampling_seeds(rows)[0]
+
+    assert window["metrics"]["lpips"] == 4.0
+    assert window["last"]["lpips"] == 5.0
+    assert window["horizons"]["4"]["lpips"] == 6.0
+    assert window["temporal"]["per_frame_mse"] == [4.0, 5.0]
+    assert window["temporal"]["mean_mse"] == 4.5
+    assert window["temporal"]["per_frame_l1"] == [8.0, 9.0]
+    assert window["temporal"]["mean_l1"] == 8.5
+    assert window["reconstructed_i0"]["mse"] == 7.0
+
+
+def test_nested_seed_aggregation_rejects_incompatible_lists() -> None:
+    rows = [
+        {
+            "window_id": "w0",
+            "raw_session": "a",
+            "sampling_seed": seed,
+            "metrics": {"lpips": 1.0},
+            "temporal": {"per_frame_mse": values},
+        }
+        for seed, values in enumerate(([1.0, 2.0], [3.0]))
+    ]
+
+    with pytest.raises(ValueError, match="incompatible list lengths"):
+        collapse_sampling_seeds(rows)
+
+
+def test_single_seed_nested_results_are_preserved_exactly() -> None:
+    row = {
+        "window_id": "w0",
+        "raw_session": "a",
+        "sampling_seed": 0,
+        "metrics": {"psnr": math.inf},
+        "last": {"psnr": math.inf},
+        "horizons": {"4": {"ssim": 0.75}},
+        "temporal": {"per_frame_l1": [1.0, 2.0], "mean_l1": 1.5},
+        "reconstructed_i0": {"mse": 0.0},
+    }
+
+    collapsed = collapse_sampling_seeds([row])[0]
+
+    assert collapsed["last"] == row["last"]
+    assert collapsed["horizons"] == row["horizons"]
+    assert collapsed["temporal"] == row["temporal"]
+    assert collapsed["reconstructed_i0"] == row["reconstructed_i0"]
 
 
 def test_already_normalized_actions_are_not_normalized_twice() -> None:
