@@ -375,6 +375,14 @@ class UMIFTZarrIterableDataset(IterableDataset):
             raise ValueError(
                 f"episode_{episode.episode_id} RGB/pose timestamp error {max_alignment_error:.6f}s exceeds 20 ms"
             )
+        relative_timestamps = rgb_timestamps - rgb_timestamps[0]
+        ideal_timestamps = np.arange(_VIDEO_FRAMES, dtype=np.float64) / self.fps
+        max_grid_error = float(np.max(np.abs(relative_timestamps - ideal_timestamps)))
+        if max_grid_error > 0.020 + 1e-12:
+            raise ValueError(
+                f"episode_{episode.episode_id} timestamp error {max_grid_error:.6f}s exceeds "
+                f"the 20 ms tolerance from the ideal {self.fps:g} Hz grid"
+            )
         physical_action_np = _framewise_actions(poses)
         if physical_action is not None:
             action_array = (
@@ -417,7 +425,12 @@ class UMIFTZarrIterableDataset(IterableDataset):
             "condition_target_summary": "vision_clean=[0];action_clean=[0..15];vision_target=[1..16]",
         }
         if self.transform is not None:
-            return self.transform(sample, self.resolution, action_normalizer=self.action_normalizer)
+            return self.transform(
+                sample,
+                self.resolution,
+                action_normalizer=self.action_normalizer,
+                action_valid_mask=torch.ones(10, dtype=torch.bool),
+            )
         return sample
 
 
@@ -462,6 +475,16 @@ def get_umift_zarr_sft_dataset(
     )
 
 
+def get_umift_dataloader_generator(seed: int = 42) -> torch.Generator:
+    """Return an isolated DataLoader base-seed generator for exact RNG resume.
+
+    ``DataLoader.__iter__`` draws ``_base_seed`` even with ``num_workers=0``.
+    Supplying this generator prevents that bookkeeping draw from advancing the
+    model's global Torch CPU RNG restored by DCP.
+    """
+    return torch.Generator().manual_seed(int(seed))
+
+
 def get_umift_packing_dataloader(**kwargs: Any) -> Any:
     """Build a one-sample packer that propagates trainer resume offsets to UMI-FT.
 
@@ -490,6 +513,7 @@ __all__ = [
     "UMIFTZarrIterableDataset",
     "denormalize_umift_action",
     "get_umift_packing_dataloader",
+    "get_umift_dataloader_generator",
     "get_umift_zarr_sft_dataset",
     "normalize_umift_action",
 ]

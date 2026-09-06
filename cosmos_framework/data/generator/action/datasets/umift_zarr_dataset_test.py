@@ -24,6 +24,7 @@ UMIFTZarrIterableDataset = _MODULE.UMIFTZarrIterableDataset
 _framewise_actions = _MODULE._framewise_actions
 _split_episode_ids = _MODULE._split_episode_ids
 get_umift_zarr_sft_dataset = _MODULE.get_umift_zarr_sft_dataset
+get_umift_dataloader_generator = _MODULE.get_umift_dataloader_generator
 normalize_umift_action = _MODULE.normalize_umift_action
 denormalize_umift_action = _MODULE.denormalize_umift_action
 
@@ -176,6 +177,18 @@ def test_timestamp_alignment_allows_20ms_and_rejects_more_or_nonfinite_pose(tmp_
         next(iter(UMIFTZarrIterableDataset(store, split="train", stage="smoke", transform=None)))
 
 
+def test_window_rejects_timestamp_jump_from_ideal_15hz_grid(tmp_path) -> None:
+    store = _make_store(tmp_path / "grid.zarr")
+    root = zarr.open_group(store, mode="a")
+    for key in ("rgb_time_stamps_0", "robot_time_stamps_0"):
+        timestamps = root[f"data/episode_0/{key}"][:]
+        timestamps[16:] += 0.021
+        root[f"data/episode_0/{key}"][:] = timestamps
+
+    with pytest.raises(ValueError, match="15 Hz grid"):
+        next(iter(UMIFTZarrIterableDataset(store, split="train", stage="smoke", transform=None)))
+
+
 def test_training_stream_resume_reproduces_next_samples(tmp_path) -> None:
     store = _make_store(tmp_path / "resume.zarr", lengths=(80, 80))
     first = UMIFTZarrIterableDataset(store, split="train", stage="e1", seed=123, transform=None)
@@ -219,6 +232,24 @@ def test_set_start_iteration_restores_rank_local_microbatch_position(tmp_path) -
         suffix = [(x["episode_id"], x["window_start"]) for x in islice(iter(resumed), 5)]
 
         assert suffix == full[5:]
+
+
+def test_dataloader_iterator_does_not_advance_global_torch_cpu_rng(tmp_path) -> None:
+    store = _make_store(tmp_path / "loader_rng.zarr")
+    dataset = UMIFTZarrIterableDataset(store, split="train", stage="smoke", transform=None)
+    torch.manual_seed(123)
+    expected_state = torch.get_rng_state().clone()
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=None,
+        num_workers=0,
+        generator=get_umift_dataloader_generator(seed=42),
+    )
+    iterator = iter(loader)
+    next(iterator)
+
+    assert torch.equal(torch.get_rng_state(), expected_state)
 
 
 def test_factory_rejects_non_forward_dynamics_mode(tmp_path) -> None:
@@ -275,6 +306,7 @@ def test_factory_transformed_sample_reaches_real_action_processor(tmp_path) -> N
                 sample,
                 sample["action"],
                 action_normalizer=action_normalizer,
+                action_valid_mask=kwargs.get("action_valid_mask"),
             )
 
     transforms = types.ModuleType("cosmos_framework.data.generator.action.utils.transforms")
@@ -286,6 +318,7 @@ def test_factory_transformed_sample_reaches_real_action_processor(tmp_path) -> N
 
     assert sample["action_raw"].shape == (16, 10)
     assert sample["action"].shape == (16, 64)
+    assert sample["action_valid_mask"].tolist() == [True] * 10 + [False] * 54
     torch.testing.assert_close(sample["action"][:, :10], sample["model_action"])
     restored = processing.ActionProcessor.postprocess_action(
         sample["action"], sample["action_processing_record"]

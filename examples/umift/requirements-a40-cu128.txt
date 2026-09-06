@@ -1,6 +1,9 @@
 # New isolated A40 E1 environment; Python 3.13.15. Never install into the existing UMI-FT environment.
 # Direct requirements pinned from repository uv.lock at c23cf8c; Zarr v2 preserves the source-store reader API.
 # Install custom NATTEN/Transformer Engine/Flash Attention cp313 wheels from the official v1.5.0 index separately.
+# LeRobot is the repository-locked fork, not PyPI's default release. On restricted
+# A40 networking the identical commit archive can be downloaded and transferred.
+lerobot @ git+https://github.com/mli0603/lerobot.git@1a4316c6845330bc552fb982dbc44bdb4f66f2f1
 --extra-index-url https://download.pytorch.org/whl/cu128
 accelerate==1.13.0
 aioboto3==15.5.0

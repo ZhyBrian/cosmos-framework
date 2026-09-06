@@ -28,6 +28,7 @@ def test_experiment_is_registered_and_uses_edge_umift_fd_contract() -> None:
     assert "NANO_MODEL_CONFIG" not in source
     assert "get_umift_zarr_sft_dataset" in source
     assert "get_umift_packing_dataloader" in source
+    assert "get_umift_dataloader_generator" in source
     assert "dataloader_train=L(get_umift_packing_dataloader)(" in source
     assert "from cosmos_framework.data.generator.processors import build_processor_lazy" not in source
     assert 'tokenizer_type="${oc.env:EDGE_HF_SNAPSHOT_PATH}"' in source
@@ -41,6 +42,7 @@ def test_experiment_is_registered_and_uses_edge_umift_fd_contract() -> None:
     assert "max_samples_per_batch=1" in source
     assert "max_sequence_length=None" in source
     assert "num_workers=0" in source
+    assert "generator=L(get_umift_dataloader_generator)(seed=42)" in source
     assert "persistent_workers=False" in source
     assert "prefetch_factor" not in source
 

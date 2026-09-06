@@ -248,7 +248,12 @@ def run_config(args: argparse.Namespace) -> dict[str, Any]:
 def run_attention() -> dict[str, Any]:
     os.environ["I4_ATTN_BACKENDS"] = "natten"
     assert "I4_ATTN_BACKENDS_MULTIDIM" not in os.environ, "unset I4_ATTN_BACKENDS_MULTIDIM for ordinary varlen"
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") == "0", (
+        "attention probe requires the caller to set CUDA_VISIBLE_DEVICES=0 exactly"
+    )
     import torch
+    import torch.nn.functional as F
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     assert torch.cuda.is_available(), "CUDA is unavailable"
     assert torch.cuda.device_count() == 1, "run as CUDA_VISIBLE_DEVICES=0; attention probe requires exactly one visible GPU"
     capability = torch.cuda.get_device_capability(0)
@@ -259,9 +264,12 @@ def run_attention() -> dict[str, Any]:
     from cosmos_framework.model.attention.varlen import generate_varlen_parameters
     torch.manual_seed(42)
     device = torch.device("cuda:0")
-    q = torch.randn(1, 11, 4, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
-    k = torch.randn(1, 11, 4, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
-    v = torch.randn(1, 11, 4, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+    q_ref = torch.randn(1, 11, 4, 64, device=device, dtype=torch.float32, requires_grad=True)
+    k_ref = torch.randn(1, 11, 4, 64, device=device, dtype=torch.float32, requires_grad=True)
+    v_ref = torch.randn(1, 11, 4, 64, device=device, dtype=torch.float32, requires_grad=True)
+    q = q_ref.detach().to(torch.bfloat16).requires_grad_()
+    k = k_ref.detach().to(torch.bfloat16).requires_grad_()
+    v = v_ref.detach().to(torch.bfloat16).requires_grad_()
     lengths = torch.tensor([5, 6], device=device, dtype=torch.int32)
     cu_q, cu_k, max_q, max_k = generate_varlen_parameters(q, k, v, lengths, lengths)
     output = attention(
@@ -273,11 +281,53 @@ def run_attention() -> dict[str, Any]:
     assert isinstance(output, torch.Tensor) and output.shape == q.shape
     assert torch.isfinite(output).all().item(), "NATTEN forward produced non-finite values"
     output.float().square().mean().backward()
+
+    reference_segments = []
+    start = 0
+    with sdpa_kernel(SDPBackend.MATH):
+        for length in lengths.tolist():
+            stop = start + int(length)
+            reference_segments.append(
+                F.scaled_dot_product_attention(
+                    q_ref[:, start:stop].transpose(1, 2),
+                    k_ref[:, start:stop].transpose(1, 2),
+                    v_ref[:, start:stop].transpose(1, 2),
+                    dropout_p=0.0,
+                    is_causal=False,
+                ).transpose(1, 2)
+            )
+            start = stop
+    reference = torch.cat(reference_segments, dim=1)
+    reference.square().mean().backward()
+
+    def metrics(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
+        delta = actual.detach().float() - expected.detach().float()
+        expected_norm = torch.linalg.vector_norm(expected.detach().float()).clamp_min(1.0e-12)
+        return {
+            "rmse": float(delta.square().mean().sqrt().item()),
+            "relative_l2": float((torch.linalg.vector_norm(delta) / expected_norm).item()),
+            "max_abs": float(delta.abs().max().item()),
+        }
+
+    comparisons = {"output": metrics(output, reference)}
+    tolerances = {
+        "output": {"relative_l2": 0.03, "max_abs": 0.05},
+        "gradient": {"relative_l2": 0.08, "max_abs": 0.01},
+    }
     for name, tensor in (("q", q), ("k", k), ("v", v)):
         assert tensor.grad is not None and torch.isfinite(tensor.grad).all().item(), f"{name} grad is non-finite"
         assert tensor.grad.abs().sum().item() > 0, f"{name} grad is all zero"
+        reference_tensor = {"q": q_ref, "k": k_ref, "v": v_ref}[name]
+        assert reference_tensor.grad is not None
+        comparisons[f"{name}_grad"] = metrics(tensor.grad, reference_tensor.grad)
+    for name, result in comparisons.items():
+        limit = tolerances["output" if name == "output" else "gradient"]
+        assert result["relative_l2"] <= limit["relative_l2"], f"{name} relative L2 mismatch: {result}"
+        assert result["max_abs"] <= limit["max_abs"], f"{name} max-abs mismatch: {result}"
     return {"device": torch.cuda.get_device_name(0), "capability": list(capability), "dtype": "bfloat16",
-            "backend": "natten", "layout": "ordinary_varlen_1d", "segments": [5, 6], "finite_grads": True}
+            "backend": "natten", "layout": "ordinary_varlen_1d", "segments": [5, 6], "finite_grads": True,
+            "reference": "per-segment torch FP32 scaled_dot_product_attention (MATH backend)",
+            "comparisons": comparisons, "tolerances": tolerances}
 
 
 def run_model(args: argparse.Namespace) -> dict[str, Any]:

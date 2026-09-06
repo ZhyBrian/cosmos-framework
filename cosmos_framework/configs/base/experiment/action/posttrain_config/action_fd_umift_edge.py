@@ -9,6 +9,7 @@ from hydra.core.config_store import ConfigStore
 
 from cosmos_framework.configs.base.experiment.sft.models.edge_model_config import EDGE_MODEL_CONFIG
 from cosmos_framework.data.generator.action.datasets.umift_zarr_dataset import (
+    get_umift_dataloader_generator,
     get_umift_packing_dataloader,
     get_umift_zarr_sft_dataset,
 )
@@ -157,6 +158,7 @@ action_fd_umift_edge = LazyDict(
             tokenizer_temporal_compression_factor="${model.config.tokenizer.temporal_compression_factor}",
             dataloader=L(RankPartitionedDataLoader)(
                 batch_size=1,
+                generator=L(get_umift_dataloader_generator)(seed=42),
                 in_order=True,
                 num_workers=0,
                 persistent_workers=False,

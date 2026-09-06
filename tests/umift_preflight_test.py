@@ -9,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "examples/umift/preflight.py"
+ENV_PATH = ROOT / "examples/umift/a40_env.sh"
 SPEC = importlib.util.spec_from_file_location("umift_preflight", PATH)
 assert SPEC and SPEC.loader
 preflight = importlib.util.module_from_spec(SPEC)
@@ -17,6 +18,17 @@ SPEC.loader.exec_module(preflight)
 
 def ns(**kwargs):
     return SimpleNamespace(**kwargs)
+
+
+def test_a40_env_is_scoped_to_fixed_venv_and_explicit_gpu_selection() -> None:
+    source = ENV_PATH.read_text(encoding="utf-8")
+    assert "/data/cosmos_envs/umi_edge_e1_py313" in source
+    assert '0|0,1,2,3)' in source
+    assert 'CURAND_HOME="$_umift_site/nvidia/curand"' in source
+    assert 'CUDNN_HOME="$_umift_site/nvidia/cudnn"' in source
+    assert 'NVRTC_HOME="$_umift_site/nvidia/cuda_nvrtc"' in source
+    assert 'I4_ATTN_BACKENDS="${I4_ATTN_BACKENDS:-natten}"' in source
+    assert "unset I4_ATTN_BACKENDS_MULTIDIM" in source
 
 
 def test_local_artifacts_reject_remote_or_ambiguous_sources(tmp_path: Path) -> None:
