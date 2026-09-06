@@ -152,6 +152,45 @@ def test_action_permutation_stays_in_split_and_preserves_frozen_pair_ids(tmp_pat
     assert json.loads(path.read_text()) == pairs
 
 
+def test_action_permutation_does_not_wrap_largest_motion_to_smallest() -> None:
+    rows = [
+        {"window_id": f"w{i}", "split": "dev", "translation_magnitude": value, "rotation_magnitude": 0.0}
+        for i, value in enumerate((0.0, 1.0, 2.0, 100.0))
+    ]
+
+    pairs = build_action_permutation(rows)
+
+    assert pairs["w3"] != "w0"
+    assert set(pairs) == set(pairs.values())
+
+
+def test_action_permutation_uses_rotation_when_translation_is_equal() -> None:
+    rows = [
+        {"window_id": f"w{i}", "split": "dev", "translation_magnitude": 1.0, "rotation_magnitude": value}
+        for i, value in enumerate((0.0, 0.1, 10.0, 10.1))
+    ]
+
+    pairs = build_action_permutation(rows)
+
+    assert pairs["w0"] == "w1"
+    assert pairs["w1"] == "w0"
+    assert pairs["w2"] == "w3"
+    assert pairs["w3"] == "w2"
+
+
+def test_action_permutation_odd_count_is_bijective_without_self_pairs() -> None:
+    rows = [
+        {"window_id": f"w{i}", "split": "history", "translation_magnitude": float(i),
+         "rotation_magnitude": float(i % 2)}
+        for i in range(5)
+    ]
+
+    pairs = build_action_permutation(rows)
+
+    assert set(pairs) == set(pairs.values())
+    assert all(source != replacement for source, replacement in pairs.items())
+
+
 def test_four_previews_are_deterministic_approximately_equal_positions() -> None:
     ids = [f"w{i:02d}" for i in range(9)]
     assert select_session_previews(ids, count=4) == ["w00", "w03", "w05", "w08"]

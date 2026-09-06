@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from skimage.metrics import structural_similarity
 
 from examples.umift.protocol import derive_noise_seed, persistence_prediction
@@ -219,7 +220,7 @@ def sparse_window_starts(num_source_frames: int) -> list[int]:
 def build_action_permutation(
     rows: Iterable[dict[str, Any]], *, output_path: str | Path | None = None
 ) -> dict[str, str]:
-    """Make a deterministic within-split derangement ordered by whole-trajectory magnitudes."""
+    """Make a minimum-cost within-split derangement of whole-trajectory magnitudes."""
     by_split: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_split[str(row["split"])].append(row)
@@ -227,16 +228,29 @@ def build_action_permutation(
     for split, members in sorted(by_split.items()):
         if len(members) < 2:
             raise ValueError(f"split {split!r} needs at least two windows for permutation")
-        ordered = sorted(
-            members,
-            key=lambda row: (
-                float(row["translation_magnitude"]),
-                float(row["rotation_magnitude"]),
-                str(row["window_id"]),
-            ),
+        ordered = sorted(members, key=lambda row: str(row["window_id"]))
+        features = np.asarray(
+            [
+                [float(row["translation_magnitude"]), float(row["rotation_magnitude"])]
+                for row in ordered
+            ],
+            dtype=np.float64,
         )
-        for index, source in enumerate(ordered):
-            pairs[str(source["window_id"])] = str(ordered[(index + 1) % len(ordered)]["window_id"])
+        scales = np.std(features, axis=0)
+        scales = np.where(scales == 0.0, 1.0, scales)
+        normalized = features / scales
+        differences = normalized[:, None, :] - normalized[None, :, :]
+        cost = np.sum(np.square(differences), axis=2)
+        np.fill_diagonal(cost, np.inf)
+        source_indices, replacement_indices = linear_sum_assignment(cost)
+        if np.any(source_indices == replacement_indices):
+            raise RuntimeError(f"split {split!r} assignment contains a self-pair")
+        for source_index, replacement_index in zip(
+            source_indices.tolist(), replacement_indices.tolist(), strict=True
+        ):
+            source = str(ordered[source_index]["window_id"])
+            replacement = str(ordered[replacement_index]["window_id"])
+            pairs[source] = replacement
     if output_path is not None:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)

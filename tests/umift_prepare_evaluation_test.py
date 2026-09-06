@@ -8,6 +8,7 @@ import pytest
 from examples.umift.prepare_evaluation import (
     OUTPUT_NAMES,
     action_magnitudes,
+    pair_diagnostics,
     select_time_previews,
     validate_empty_output,
 )
@@ -54,3 +55,25 @@ def test_existing_output_refuses_before_writing(tmp_path: Path) -> None:
 
     assert existing.read_text() == "frozen\n"
     assert not (tmp_path / OUTPUT_NAMES[0]).exists()
+
+
+def test_pair_diagnostics_report_general_worst_pairs_and_normalization() -> None:
+    rows = [
+        {"window_id": "w0", "translation_magnitude": 0.0, "rotation_magnitude": 0.0},
+        {"window_id": "w1", "translation_magnitude": 1.0, "rotation_magnitude": 4.0},
+        {"window_id": "w2", "translation_magnitude": 3.0, "rotation_magnitude": 5.0},
+    ]
+    pairs = {"w0": "w1", "w1": "w2", "w2": "w0"}
+
+    diagnostics = pair_diagnostics(rows, pairs)
+
+    assert "cycle_tail_pair" not in diagnostics
+    assert diagnostics["algorithm"].startswith("linear_sum_assignment")
+    assert diagnostics["normalization_scales"]["translation_standard_deviation_or_one"] == pytest.approx(
+        np.std([0.0, 1.0, 3.0])
+    )
+    assert diagnostics["translation_difference"]["median"] == pytest.approx(2.0)
+    assert diagnostics["translation_difference"]["p95"] == pytest.approx(2.9)
+    assert diagnostics["translation_difference"]["max"] == pytest.approx(3.0)
+    assert diagnostics["translation_difference"]["worst_pair"]["source"] == "w2"
+    assert diagnostics["rotation_difference"]["worst_pair"]["source"] == "w2"

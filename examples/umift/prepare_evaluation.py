@@ -119,6 +119,15 @@ def select_time_previews(rows: Iterable[dict[str, Any]], *, count: int = 4) -> d
 
 def pair_diagnostics(rows: list[dict[str, Any]], pairs: dict[str, str]) -> dict[str, Any]:
     by_id = {str(row["window_id"]): row for row in rows}
+    features = np.asarray(
+        [
+            [float(row["translation_magnitude"]), float(row["rotation_magnitude"])]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    scales = np.std(features, axis=0)
+    scales = np.where(scales == 0.0, 1.0, scales)
     records = []
     for source, replacement in sorted(pairs.items()):
         left, right = by_id[source], by_id[replacement]
@@ -134,30 +143,29 @@ def pair_diagnostics(rows: list[dict[str, Any]], pairs: dict[str, str]) -> dict[
                 ),
             }
         )
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            float(row["translation_magnitude"]),
-            float(row["rotation_magnitude"]),
-            str(row["window_id"]),
-        ),
-    )
-    tail_identity = (str(ordered[-1]["window_id"]), str(ordered[0]["window_id"]))
-    tail = next(row for row in records if (row["source"], row["replacement"]) == tail_identity)
-    non_tail = [row for row in records if row is not tail]
-    diagnostics: dict[str, Any] = {"pair_count": len(records), "cycle_tail_pair": tail}
+    diagnostics: dict[str, Any] = {
+        "algorithm": "linear_sum_assignment with squared Euclidean cost and forbidden diagonal",
+        "features": ["translation_magnitude", "rotation_magnitude"],
+        "normalization_scales": {
+            "translation_standard_deviation_or_one": float(scales[0]),
+            "rotation_standard_deviation_or_one": float(scales[1]),
+        },
+        "pair_count": len(records),
+    }
     warnings = []
     for label in ("translation", "rotation"):
         field = f"{label}_abs_difference"
         values = [float(row[field]) for row in records]
-        median_non_tail = float(np.median([float(row[field]) for row in non_tail]))
+        median = float(np.median(values))
+        worst_pair = max(records, key=lambda row: (float(row[field]), row["source"], row["replacement"]))
         diagnostics[f"{label}_difference"] = {
-            "mean": float(np.mean(values)),
-            "median_non_tail": median_non_tail,
-            "max": max(values),
+            "median": median,
+            "p95": float(np.percentile(values, 95)),
+            "max": float(worst_pair[field]),
+            "worst_pair": worst_pair,
         }
-        if float(tail[field]) > 5.0 * max(median_non_tail, 1e-12):
-            warnings.append(f"cycle-tail {field} exceeds 5x the non-tail median")
+        if float(worst_pair[field]) > 5.0 * max(median, 1e-12):
+            warnings.append(f"worst-pair {field} exceeds 5x the median")
     diagnostics["heuristic_warnings"] = warnings
     diagnostics["heuristic_is_acceptance_gate"] = False
     return diagnostics
