@@ -88,7 +88,8 @@ def compare_reports(base: dict[str, Any], trained: dict[str, Any]) -> dict[str, 
 
 
 def expected_overfit_window_id(rank: int, draw: int) -> str:
-    return f"episode_0:s={64 * ((draw + rank) % 4)}"
+    del draw
+    return f"episode_0:s={64 * (rank % 4)}"
 
 
 def _first_int(value: Any) -> int:

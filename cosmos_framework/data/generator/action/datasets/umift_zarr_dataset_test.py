@@ -24,6 +24,7 @@ TRAIN_EPISODES = _MODULE.TRAIN_EPISODES
 UMIFTZarrIterableDataset = _MODULE.UMIFTZarrIterableDataset
 _framewise_actions = _MODULE._framewise_actions
 _split_episode_ids = _MODULE._split_episode_ids
+_OVERFIT_STARTS = _MODULE._OVERFIT_STARTS
 get_umift_zarr_sft_dataset = _MODULE.get_umift_zarr_sft_dataset
 get_umift_dataloader_generator = _MODULE.get_umift_dataloader_generator
 get_umift_packing_dataloader = _MODULE.get_umift_packing_dataloader
@@ -207,16 +208,25 @@ def test_training_stream_resume_reproduces_next_samples(tmp_path) -> None:
     assert actual == expected
 
 
-@pytest.mark.parametrize("stage, expected_starts", [("smoke", {0}), ("overfit", {0, 64, 128, 192})])
-def test_e0_stream_repeats_forever_without_empty_rank(tmp_path, stage, expected_starts) -> None:
+@pytest.mark.parametrize("stage, expected_by_rank", [("smoke", [0] * 4), ("overfit", [0, 64, 128, 192])])
+def test_e0_stream_repeats_forever_with_fixed_rank_window(tmp_path, stage, expected_by_rank) -> None:
     store = _make_store(tmp_path / f"{stage}.zarr", lengths=(240, 40))
-    for rank in range(4):
+    for rank, expected_start in enumerate(expected_by_rank):
         dataset = UMIFTZarrIterableDataset(store, split="train", stage=stage, transform=None)
         dataset.shard_world_size = 4
         dataset.shard_rank = rank
-        starts = [sample["window_start"] for sample in islice(iter(dataset), 6)]
-        assert len(starts) == 6
-        assert set(starts) <= expected_starts
+        assert [sample["window_start"] for sample in islice(iter(dataset), 8)] == [expected_start] * 8
+
+
+def test_overfit_resume_offset_keeps_each_rank_on_its_fixed_window(tmp_path) -> None:
+    store = _make_store(tmp_path / "overfit_resume.zarr", lengths=(240, 40))
+    for rank, expected_start in enumerate(_OVERFIT_STARTS):
+        dataset = UMIFTZarrIterableDataset(store, split="train", stage="overfit", transform=None)
+        dataset.shard_world_size = 4
+        dataset.shard_rank = rank
+        dataset.set_start_iteration(20)
+
+        assert [sample["window_start"] for sample in islice(iter(dataset), 4)] == [expected_start] * 4
 
 
 def test_set_start_iteration_restores_rank_local_microbatch_position(tmp_path) -> None:

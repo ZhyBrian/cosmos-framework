@@ -326,7 +326,8 @@ class UMIFTZarrIterableDataset(IterableDataset):
             def repeated_draws() -> Iterator[tuple[int, _Episode, int]]:
                 nonlocal local_index
                 while True:
-                    episode, start = windows[(local_index + global_shard) % len(windows)]
+                    window_index = global_shard if self.stage == "overfit" else local_index + global_shard
+                    episode, start = windows[window_index % len(windows)]
                     yield local_index, episode, start
                     local_index += 1
 

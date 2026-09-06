@@ -54,12 +54,12 @@ def test_compare_requires_all_fixture_hashes_before_loss_comparison() -> None:
             probe.compare_reports(_report(), _report(mutate=field))
 
 
-def test_overfit_rotation_and_invalid_loss_contract() -> None:
+def test_overfit_fixed_rank_windows_and_invalid_loss_contract() -> None:
     assert [[probe.expected_overfit_window_id(rank, draw) for draw in range(4)] for rank in range(4)] == [
-        ["episode_0:s=0", "episode_0:s=64", "episode_0:s=128", "episode_0:s=192"],
-        ["episode_0:s=64", "episode_0:s=128", "episode_0:s=192", "episode_0:s=0"],
-        ["episode_0:s=128", "episode_0:s=192", "episode_0:s=0", "episode_0:s=64"],
-        ["episode_0:s=192", "episode_0:s=0", "episode_0:s=64", "episode_0:s=128"],
+        ["episode_0:s=0"] * 4,
+        ["episode_0:s=64"] * 4,
+        ["episode_0:s=128"] * 4,
+        ["episode_0:s=192"] * 4,
     ]
     negative = _report()
     negative["rows"][0]["loss"] = -1.0
