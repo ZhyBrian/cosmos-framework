@@ -350,6 +350,20 @@ def test_real_action_processor_normalizes_once_and_preserves_physical_action_raw
     torch.testing.assert_close(restored, physical, atol=1e-6, rtol=1e-6)
 
 
+def test_quantile_formulas_are_equivalent_in_float64() -> None:
+    q01 = _MODULE._UMI_Q01.astype(np.float64)
+    q99 = _MODULE._UMI_Q99.astype(np.float64)
+    physical = np.array(
+        [[0.01, -0.02, 0.03, 1.0, 0.001, -0.002, 0.003, 1.0, -0.004, 0.0]],
+        dtype=np.float64,
+    )
+
+    endpoint_form = 2.0 * (physical - q01) / (q99 - q01) - 1.0
+    centered_form = (physical - (q99 + q01) / 2.0) / ((q99 - q01) / 2.0)
+
+    np.testing.assert_allclose(endpoint_form, centered_form, atol=2e-14, rtol=2e-14)
+
+
 def test_factory_transformed_sample_reaches_real_action_processor(tmp_path) -> None:
     processing = _load_real_action_processing_module()
 
@@ -376,7 +390,10 @@ def test_factory_transformed_sample_reaches_real_action_processor(tmp_path) -> N
     assert sample["action_raw"].shape == (16, 10)
     assert sample["action"].shape == (16, 64)
     assert sample["action_valid_mask"].tolist() == [True] * 10 + [False] * 54
-    torch.testing.assert_close(sample["action"][:, :10], sample["model_action"])
+    assert torch.equal(sample["action"][:, :10], sample["model_action"])
+    assert sample["physical_action"][0, 3].item() == 1.0
+    assert sample["model_action"][0, 3].item() == sample["action"][0, 3].item()
+    assert sample["model_action"][0, 3].item() != normalize_umift_action(sample["physical_action"])[0, 3].item()
     restored = processing.ActionProcessor.postprocess_action(
         sample["action"], sample["action_processing_record"]
     )

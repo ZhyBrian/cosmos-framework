@@ -67,6 +67,7 @@ def test_recipe_has_exact_edge_training_contract() -> None:
         'cfg["parallelism"]["fsdp_master_dtype"] = "float32"',
         'cfg["parallelism"]["fsdp_reduce_dtype"] = "bfloat16"',
         "grad_accum_iter=4",
+        "straggler_detection=dict(enabled=False, report_freq=10)",
         "max_iter=1000",
         "max_consecutive_nan=1",
         "clip_norm=1.0",

@@ -93,6 +93,7 @@ def assert_edge_fd_config(config: Any) -> dict[str, Any]:
         "scheduler.f_min": [0.1],
         "scheduler.f_start": [0.0],
         "trainer.grad_accum_iter": 4,
+        "trainer.straggler_detection.enabled": False,
         "checkpoint.load_training_state": False,
         "checkpoint.strict_resume": True,
         "dataloader_train.max_samples_per_batch": 1,

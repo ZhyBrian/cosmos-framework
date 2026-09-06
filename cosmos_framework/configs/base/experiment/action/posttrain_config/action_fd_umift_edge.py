@@ -115,7 +115,7 @@ action_fd_umift_edge = LazyDict(
             cudnn=dict(benchmark=True, deterministic=False),
             ddp=dict(broadcast_buffers=True, find_unused_parameters=False, static_graph=True),
             grad_scaler_args=dict(enabled=False),
-            straggler_detection=dict(enabled=True, report_freq=10),
+            straggler_detection=dict(enabled=False, report_freq=10),
             callbacks=dict(
                 compile_tokenizer=dict(enabled=False, warmup_resolutions=None),
                 dataloader_speed=dict(every_n=10, save_s3=False, step_size=1),

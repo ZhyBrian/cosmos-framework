@@ -396,9 +396,12 @@ class UMIFTZarrIterableDataset(IterableDataset):
             )
             if physical_action_np.shape != (_ACTION_STEPS, 10):
                 raise ValueError(f"physical_action must have shape (16, 10), got {physical_action_np.shape}")
-        model_action_np = normalize_umift_action(physical_action_np)
         physical_action = torch.from_numpy(physical_action_np)
-        model_action = torch.from_numpy(model_action_np)
+        model_action = (
+            self.action_normalizer.normalize_action(physical_action)
+            if self.action_normalizer is not None
+            else normalize_umift_action(physical_action)
+        )
         video = torch.from_numpy(np.ascontiguousarray(rgb)).permute(0, 3, 1, 2).float()
         video = F.interpolate(video, size=(256, 256), mode="bilinear", align_corners=False, antialias=True)
         video = video.round().clamp_(0, 255).to(torch.uint8).permute(1, 0, 2, 3).contiguous()

@@ -151,7 +151,7 @@ def test_config_contract_checks_training_semantics() -> None:
                      keys_to_select=preflight.EXPECTED_OPTIMIZER_KEYS,
                      lr_multipliers={key: 5.0 for key in preflight.ACTION_LR_KEYS}),
         scheduler=ns(cycle_lengths=[1000], warm_up_steps=[100], f_max=[1.0], f_min=[0.1], f_start=[0.0]),
-        trainer=ns(grad_accum_iter=4, max_iter=1000),
+        trainer=ns(grad_accum_iter=4, max_iter=1000, straggler_detection=ns(enabled=False)),
         checkpoint=ns(load_training_state=False, strict_resume=True),
         dataloader_train=ns(max_samples_per_batch=1, max_sequence_length=None),
     )
