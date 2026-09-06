@@ -7,6 +7,7 @@ import pytest
 from examples.umift.infer import (
     E0_OVERFIT_STARTS,
     _window_id,
+    _structure_runtime_configs,
     condition_only_video,
     compare_checkpoint_keys,
     decoded_video_to_thwc01,
@@ -156,6 +157,31 @@ def test_checkpoint_key_comparison_rejects_missing_and_unexpected_keys() -> None
     assert compare_checkpoint_keys({"a", "b"}, {"a", "b"}) == {"model_key_count": 2, "checkpoint_key_count": 2}
     with pytest.raises(ValueError, match=r"missing=\['b'\].*unexpected=\['c'\]"):
         compare_checkpoint_keys({"a", "b"}, {"a", "c"})
+
+
+def test_runtime_configs_roundtrip_type_metadata_and_apply_inference_overrides() -> None:
+    pytest.importorskip("torch")
+    from cosmos_framework.configs.base.defaults.compile import CompileConfig
+    from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
+    from cosmos_framework.configs.base.defaults.quantization import QuantizationConfig
+    from cosmos_framework.inference.common.config import unstructure_config
+
+    parallelism = unstructure_config(ParallelismConfig(enable_inference_mode=False))
+    compile_options = unstructure_config(CompileConfig(enabled=True))
+    quantization = unstructure_config(QuantizationConfig())
+    assert all("_type" in value for value in (parallelism, compile_options, quantization))
+
+    restored_parallelism, restored_compile, restored_quantization = _structure_runtime_configs({
+        "parallelism": parallelism,
+        "compile": compile_options,
+        "quantization": quantization,
+    })
+
+    assert isinstance(restored_parallelism, ParallelismConfig)
+    assert restored_parallelism.enable_inference_mode is True
+    assert isinstance(restored_compile, CompileConfig)
+    assert restored_compile.enabled is False
+    assert isinstance(restored_quantization, QuantizationConfig)
 
 
 def test_model_launch_requires_only_gpu_zero_through_three_visible() -> None:

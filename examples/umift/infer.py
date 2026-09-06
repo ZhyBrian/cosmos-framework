@@ -162,11 +162,25 @@ def build_singleton_batch(sample: dict[str, Any]) -> dict[str, Any]:
     return batch
 
 
-def load_edge_fd_model(sft_toml: Path, checkpoint: Path) -> tuple[Any, Any, dict[str, Any]]:
-    """Build the inference wrapper from the resolved training model config."""
+def _structure_runtime_configs(cfg: dict[str, Any]) -> tuple[Any, Any, Any]:
     from cosmos_framework.configs.base.defaults.compile import CompileConfig
     from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
     from cosmos_framework.configs.base.defaults.quantization import QuantizationConfig
+    from cosmos_framework.inference.common.config import structure_config
+
+    parallelism = dict(cfg["parallelism"])
+    parallelism["enable_inference_mode"] = True
+    compile_options = dict(cfg["compile"])
+    compile_options["enabled"] = False
+    return (
+        structure_config(parallelism, ParallelismConfig),
+        structure_config(compile_options, CompileConfig),
+        structure_config(dict(cfg.get("quantization", {})), QuantizationConfig),
+    )
+
+
+def load_edge_fd_model(sft_toml: Path, checkpoint: Path) -> tuple[Any, Any, dict[str, Any]]:
+    """Build the inference wrapper from the resolved training model config."""
     from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
     from cosmos_framework.inference.common.config import unstructure_config
     from cosmos_framework.inference.model import Cosmos3OmniConfig, Cosmos3OmniModel
@@ -180,16 +194,13 @@ def load_edge_fd_model(sft_toml: Path, checkpoint: Path) -> tuple[Any, Any, dict
     if str(cfg.get("resolution")) != "256" or cfg.get("tokenizer", {}).get("encode_exact_durations") != [17]:
         raise ValueError("resolved model does not satisfy the E1 256/17-frame contract")
     omni_config = Cosmos3OmniConfig(model=model_dict)
-    parallelism = dict(cfg["parallelism"])
-    parallelism["enable_inference_mode"] = True
-    compile_options = dict(cfg["compile"])
-    compile_options["enabled"] = False
+    parallelism_config, compile_config, quantization_config = _structure_runtime_configs(cfg)
     wrapper = Cosmos3OmniModel.from_pretrained_dcp(
         checkpoint,
         config=omni_config,
-        parallelism_config=ParallelismConfig(**parallelism),
-        compile_config=CompileConfig(**compile_options),
-        quantization_config=QuantizationConfig(**cfg.get("quantization", {})),
+        parallelism_config=parallelism_config,
+        compile_config=compile_config,
+        quantization_config=quantization_config,
     )
     wrapper.eval()
     evidence = strict_dcp_key_evidence(wrapper.model, checkpoint)
