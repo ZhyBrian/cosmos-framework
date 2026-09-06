@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
 
@@ -162,7 +163,9 @@ def build_singleton_batch(sample: dict[str, Any]) -> dict[str, Any]:
     return batch
 
 
-def _structure_runtime_configs(cfg: dict[str, Any]) -> tuple[Any, Any, Any]:
+def _structure_runtime_configs(
+    cfg: dict[str, Any], *, independent_windows: bool = False
+) -> tuple[Any, Any, Any]:
     from cosmos_framework.configs.base.defaults.compile import CompileConfig
     from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
     from cosmos_framework.configs.base.defaults.quantization import QuantizationConfig
@@ -170,6 +173,14 @@ def _structure_runtime_configs(cfg: dict[str, Any]) -> tuple[Any, Any, Any]:
 
     parallelism = dict(cfg["parallelism"])
     parallelism["enable_inference_mode"] = True
+    if independent_windows:
+        parallelism.update(
+            data_parallel_shard_degree=1,
+            data_parallel_replicate_degree=4,
+            context_parallel_shard_degree=1,
+            cfg_parallel_shard_degree=1,
+            vae_load_balance_group_size=1,
+        )
     compile_options = dict(cfg["compile"])
     compile_options["enabled"] = False
     return (
@@ -179,7 +190,9 @@ def _structure_runtime_configs(cfg: dict[str, Any]) -> tuple[Any, Any, Any]:
     )
 
 
-def load_edge_fd_model(sft_toml: Path, checkpoint: Path) -> tuple[Any, Any, dict[str, Any]]:
+def load_edge_fd_model(
+    sft_toml: Path, checkpoint: Path, *, independent_windows: bool = False
+) -> tuple[Any, Any, dict[str, Any]]:
     """Build the inference wrapper from the resolved training model config."""
     from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
     from cosmos_framework.inference.common.config import unstructure_config
@@ -193,8 +206,12 @@ def load_edge_fd_model(sft_toml: Path, checkpoint: Path) -> tuple[Any, Any, dict
         raise ValueError("resolved model is not the Edge vision+action FD graph")
     if str(cfg.get("resolution")) != "256" or cfg.get("tokenizer", {}).get("encode_exact_durations") != [17]:
         raise ValueError("resolved model does not satisfy the E1 256/17-frame contract")
+    if independent_windows and resolved.trainer.callbacks.compile_tokenizer.enabled:
+        raise ValueError("independent-window inference requires compile_tokenizer.enabled=false")
     omni_config = Cosmos3OmniConfig(model=model_dict)
-    parallelism_config, compile_config, quantization_config = _structure_runtime_configs(cfg)
+    parallelism_config, compile_config, quantization_config = _structure_runtime_configs(
+        cfg, independent_windows=independent_windows
+    )
     wrapper = Cosmos3OmniModel.from_pretrained_dcp(
         checkpoint,
         config=omni_config,
@@ -293,6 +310,73 @@ def iter_evaluation_windows(dataset: Any, split: str) -> Iterable[dict[str, Any]
         yield sample
 
 
+def iter_rank_windows(windows: Iterable[Any], *, rank: int, world_size: int) -> Iterable[tuple[int, Any]]:
+    """Assign each globally enumerated window to exactly one rank."""
+    if world_size < 1 or rank < 0 or rank >= world_size:
+        raise ValueError(f"invalid rank topology rank={rank}, world_size={world_size}")
+    for index, window in enumerate(windows):
+        if index % world_size == rank:
+            yield index, window
+
+
+def merge_rank_payloads(
+    payloads: list[dict[str, Any]],
+    *,
+    expected_world_size: int | None = None,
+    expected_window_count: int | None = None,
+    expected_seed_count: int | None = None,
+) -> list[dict[str, Any]]:
+    """Merge rank-local rows into the evaluation protocol's stable order."""
+    ranks = sorted(int(payload["rank"]) for payload in payloads)
+    if expected_world_size is not None and ranks != list(range(expected_world_size)):
+        raise ValueError(f"rank payloads must cover 0..{expected_world_size - 1}; got {ranks}")
+    rows = [row for payload in payloads for row in payload["rows"]]
+    keys = [(int(row["window_index"]), int(row["seed_index"])) for row in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate independent-window result for a window/seed pair")
+    window_ids: dict[int, str] = {}
+    for row in rows:
+        if "window_id" not in row:
+            continue
+        index = int(row["window_index"])
+        window_id = str(row["window_id"])
+        if index in window_ids and window_ids[index] != window_id:
+            raise ValueError(f"window index {index} maps to multiple window IDs")
+        window_ids[index] = window_id
+    if (expected_window_count is None) != (expected_seed_count is None):
+        raise ValueError("expected_window_count and expected_seed_count must be provided together")
+    if expected_window_count is not None and expected_seed_count is not None:
+        expected = {
+            (window_index, seed_index)
+            for window_index in range(expected_window_count)
+            for seed_index in range(expected_seed_count)
+        }
+        actual = set(keys)
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        if missing or unexpected:
+            raise ValueError(
+                f"independent-window result grid differs: missing={missing[:20]}, unexpected={unexpected[:20]}"
+            )
+    return sorted(rows, key=lambda row: (int(row["window_index"]), int(row["seed_index"])))
+
+
+def validate_independent_parallelism(parallel_dims: Any) -> None:
+    actual = (
+        int(parallel_dims.dp_replicate),
+        int(parallel_dims.dp_shard),
+        int(parallel_dims.cp),
+        int(parallel_dims.cfgp),
+        int(parallel_dims.lb),
+        bool(parallel_dims.enable_inference_mode),
+    )
+    if actual != (4, 1, 1, 1, 1, True):
+        raise ValueError(
+            "independent-window parallelism must be replicate=4, shard=1, CP=1, CFGP=1, "
+            f"VAE-LB=1, inference_mode=true; got {actual}"
+        )
+
+
 def validate_sampling_protocol(split: str, method: str, sampling_seeds: list[int]) -> None:
     if len(sampling_seeds) != len(set(sampling_seeds)):
         raise ValueError("sampling seeds must be unique")
@@ -332,7 +416,9 @@ def run_cli(args: argparse.Namespace) -> None:
     model = resolved = None
     load_evidence: dict[str, Any] | None = None
     if method != "B-Persistence":
-        model, resolved, load_evidence = load_edge_fd_model(args.sft_toml, args.checkpoint)
+        model, resolved, load_evidence = load_edge_fd_model(
+            args.sft_toml, args.checkpoint, independent_windows=args.independent_windows
+        )
     tokenizer_config = None if resolved is None else resolved.model.config.vlm_config.tokenizer
     max_action_dim = 64 if resolved is None else int(resolved.model.config.max_action_dim)
     dataset_split, dataset_stage = resolve_dataset_protocol(args.split, args.stage)
@@ -348,8 +434,26 @@ def run_cli(args: argparse.Namespace) -> None:
         max_action_dim=max_action_dim,
     )
     pairs = _load_pairs(args.pairs)
+    seeds = args.sampling_seeds if method not in {"B-Persistence", "B-VAE"} else [0]
+    expected_window_count = len(E0_OVERFIT_STARTS) if args.split == "overfit" else len(dataset)
+    distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+    rank = get_rank() if distributed else 0
+    world_size = torch.distributed.get_world_size() if distributed else 1
+    if args.independent_windows and method != "B-Persistence" and world_size != 4:
+        raise ValueError("independent-window model inference requires exactly four initialized ranks")
+    if args.independent_windows and model is not None:
+        validate_independent_parallelism(model.parallel_dims)
+    if args.independent_windows and method != "B-Persistence":
+        torch.cuda.reset_peak_memory_stats()
+    started_at = time.perf_counter()
     manifest_rows: list[dict[str, Any]] = []
-    for original in iter_evaluation_windows(dataset, args.split):
+    windows = iter_evaluation_windows(dataset, args.split)
+    assigned_windows = (
+        iter_rank_windows(windows, rank=rank, world_size=world_size)
+        if args.independent_windows
+        else enumerate(windows)
+    )
+    for window_index, original in assigned_windows:
         window_id = _window_id(original)
         sample = original
         if method == "E1-Z":
@@ -366,7 +470,6 @@ def run_cli(args: argparse.Namespace) -> None:
             )
         validate_fd_sample(sample)
         truth = np.moveaxis(_numpy(original["video"]), 0, -1).astype(np.float32) / 255.0
-        seeds = args.sampling_seeds if method not in {"B-Persistence", "B-VAE"} else [0]
         for sampling_seed in seeds:
             if method == "B-Persistence":
                 prediction = persistence_prediction(truth)
@@ -382,7 +485,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     noise_seed=derive_noise_seed(window_id, sampling_seed),
                     num_steps=args.num_steps,
                 )
-            if get_rank() == 0:
+            if args.independent_windows or rank == 0:
                 truth_path = _save_prediction(args.output_dir, "truth", window_id, 0, truth)
                 pred_path = _save_prediction(args.output_dir, method, window_id, sampling_seed, prediction)
                 manifest_rows.append(
@@ -395,14 +498,73 @@ def run_cli(args: argparse.Namespace) -> None:
                         "checkpoint_id": None if args.checkpoint is None else str(args.checkpoint),
                         "sampling_seed": int(sampling_seed),
                         "noise_seed": derive_noise_seed(window_id, sampling_seed),
+                        "window_index": int(window_index),
+                        "seed_index": int(seeds.index(sampling_seed)),
                         "truth_path": os.path.relpath(truth_path, args.output_dir),
                         "prediction_path": os.path.relpath(pred_path, args.output_dir),
                     }
                 )
-    if get_rank() == 0:
+    elapsed = time.perf_counter() - started_at
+    rank_payload = {
+        "rank": rank,
+        "rows": manifest_rows,
+        "wall_seconds": elapsed,
+        "peak_gpu_memory_bytes": 0 if method == "B-Persistence" else int(torch.cuda.max_memory_allocated()),
+        "peak_gpu_reserved_bytes": 0 if method == "B-Persistence" else int(torch.cuda.max_memory_reserved()),
+        "cuda_device": None if method == "B-Persistence" else int(torch.cuda.current_device()),
+        "cuda_device_name": None if method == "B-Persistence" else torch.cuda.get_device_name(),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "world_size": world_size,
+        "independent_windows": bool(args.independent_windows),
+        "parallelism": None
+        if model is None
+        else {
+            "data_parallel_replicate_degree": int(model.parallel_dims.dp_replicate),
+            "data_parallel_shard_degree": int(model.parallel_dims.dp_shard),
+            "context_parallel_shard_degree": int(model.parallel_dims.cp),
+            "cfg_parallel_shard_degree": int(model.parallel_dims.cfgp),
+            "vae_load_balance_group_size": int(model.parallel_dims.lb),
+        },
+    }
+    if args.independent_windows and distributed:
+        gathered: list[dict[str, Any] | None] | None = [None] * world_size if rank == 0 else None
+        torch.distributed.gather_object(rank_payload, gathered, dst=0)
+        rank_payloads = [] if gathered is None else [payload for payload in gathered if payload is not None]
+    else:
+        rank_payloads = [rank_payload]
+    if rank == 0:
+        manifest_rows = (
+            merge_rank_payloads(
+                rank_payloads,
+                expected_world_size=world_size,
+                expected_window_count=expected_window_count,
+                expected_seed_count=len(seeds),
+            )
+            if args.independent_windows
+            else manifest_rows
+        )
         manifest = args.output_dir / f"{args.split}_{method}.jsonl"
         manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in manifest_rows), encoding="utf-8")
+        public_rows = [{k: v for k, v in row.items() if k not in {"window_index", "seed_index"}} for row in manifest_rows]
+        manifest.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in public_rows), encoding="utf-8")
+        if args.independent_windows:
+            topology_path = args.output_dir / f"{args.split}_{method}_topology.json"
+            topology_path.write_text(
+                json.dumps(
+                    {
+                        "independent_windows": True,
+                        "world_size": world_size,
+                        "ranks": [
+                            {k: v for k, v in payload.items() if k != "rows"}
+                            for payload in sorted(rank_payloads, key=lambda payload: int(payload["rank"]))
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         if load_evidence is not None:
             evidence_path = args.output_dir / f"{args.split}_{method}_load_evidence.json"
             evidence_path.write_text(json.dumps(load_evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -434,6 +596,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sampling-seeds", type=int, nargs="+", default=[0])
     parser.add_argument("--num-steps", type=int, default=30)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--independent-windows",
+        action="store_true",
+        help="run disjoint windows on four unsharded model replicas and merge results once",
+    )
     args = parser.parse_args(argv)
     if args.method != "B-Persistence" and args.checkpoint is None:
         parser.error("--checkpoint is required except for persistence")

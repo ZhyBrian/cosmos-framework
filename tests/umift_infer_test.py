@@ -11,13 +11,16 @@ from examples.umift.infer import (
     condition_only_video,
     compare_checkpoint_keys,
     decoded_video_to_thwc01,
+    iter_rank_windows,
     make_action_variant,
+    merge_rank_payloads,
     run_forward_dynamics,
     iter_evaluation_windows,
     resolve_dataset_protocol,
     validate_sampling_protocol,
     validate_checkpoint_path,
     validate_fd_sample,
+    validate_independent_parallelism,
     validate_launch_environment,
 )
 
@@ -183,6 +186,19 @@ def test_runtime_configs_roundtrip_type_metadata_and_apply_inference_overrides()
     assert restored_compile.enabled is False
     assert isinstance(restored_quantization, QuantizationConfig)
 
+    independent_parallelism, independent_compile, _ = _structure_runtime_configs(
+        {"parallelism": parallelism, "compile": compile_options, "quantization": quantization},
+        independent_windows=True,
+    )
+    assert isinstance(independent_parallelism, ParallelismConfig)
+    assert independent_parallelism.enable_inference_mode is True
+    assert independent_parallelism.data_parallel_shard_degree == 1
+    assert independent_parallelism.data_parallel_replicate_degree == 4
+    assert independent_parallelism.context_parallel_shard_degree == 1
+    assert independent_parallelism.cfg_parallel_shard_degree == 1
+    assert independent_parallelism.vae_load_balance_group_size == 1
+    assert independent_compile.enabled is False
+
 
 def test_model_launch_requires_only_gpu_zero_through_three_visible() -> None:
     validate_launch_environment({"CUDA_VISIBLE_DEVICES": "0,1,2,3", "WORLD_SIZE": "4"})
@@ -239,3 +255,92 @@ def test_overfit_protocol_does_not_open_arbitrary_training_evaluation() -> None:
     for method in ("B-Persistence", "E1-Z", "E1-S"):
         with pytest.raises(ValueError, match="only supports B-VAE, B0, and E1-A"):
             validate_sampling_protocol("overfit", method, [0])
+
+
+def test_independent_window_partition_has_exact_union_no_overlap_and_unequal_tails() -> None:
+    windows = [f"w{i}" for i in range(10)]
+
+    shards = [list(iter_rank_windows(windows, rank=rank, world_size=4)) for rank in range(4)]
+
+    assert shards == [
+        [(0, "w0"), (4, "w4"), (8, "w8")],
+        [(1, "w1"), (5, "w5"), (9, "w9")],
+        [(2, "w2"), (6, "w6")],
+        [(3, "w3"), (7, "w7")],
+    ]
+    assert sorted(index for shard in shards for index, _ in shard) == list(range(10))
+
+
+def test_rank_manifest_merge_restores_window_then_seed_order() -> None:
+    payloads = [
+        {"rank": 0, "rows": [{"window_index": 4, "seed_index": 0}, {"window_index": 0, "seed_index": 1}]},
+        {"rank": 1, "rows": [{"window_index": 1, "seed_index": 1}, {"window_index": 1, "seed_index": 0}]},
+        {"rank": 2, "rows": [{"window_index": 0, "seed_index": 0}]},
+    ]
+
+    rows = merge_rank_payloads(payloads)
+
+    assert [(row["window_index"], row["seed_index"]) for row in rows] == [
+        (0, 0), (0, 1), (1, 0), (1, 1), (4, 0)
+    ]
+
+
+def test_rank_manifest_merge_rejects_duplicate_window_seed_work() -> None:
+    duplicate = {"window_index": 2, "seed_index": 0}
+    with pytest.raises(ValueError, match="duplicate independent-window result"):
+        merge_rank_payloads([
+            {"rank": 0, "rows": [duplicate]},
+            {"rank": 1, "rows": [dict(duplicate)]},
+        ])
+
+
+def test_rank_manifest_merge_rejects_missing_rank_payload() -> None:
+    with pytest.raises(ValueError, match=r"rank payloads.*\[0, 2\]"):
+        merge_rank_payloads(
+            [{"rank": 0, "rows": []}, {"rank": 2, "rows": []}],
+            expected_world_size=3,
+        )
+
+
+def test_independent_parallelism_rejects_any_collective_generation_axis() -> None:
+    valid = SimpleNamespace(dp_replicate=4, dp_shard=1, cp=1, cfgp=1, lb=1, enable_inference_mode=True)
+    validate_independent_parallelism(valid)
+    for field in ("dp_shard", "cp", "cfgp", "lb"):
+        invalid = SimpleNamespace(**vars(valid))
+        setattr(invalid, field, 2)
+        with pytest.raises(ValueError, match="independent-window parallelism"):
+            validate_independent_parallelism(invalid)
+
+
+def test_rank_manifest_merge_rejects_missing_seed_from_cartesian_product() -> None:
+    with pytest.raises(ValueError, match=r"missing=.*\(1, 1\)"):
+        merge_rank_payloads(
+            [{"rank": 0, "rows": [
+                {"window_index": 0, "seed_index": 0, "window_id": "w0"},
+                {"window_index": 0, "seed_index": 1, "window_id": "w0"},
+                {"window_index": 1, "seed_index": 0, "window_id": "w1"},
+            ]}],
+            expected_window_count=2,
+            expected_seed_count=2,
+        )
+
+
+def test_rank_manifest_merge_rejects_out_of_range_cartesian_key() -> None:
+    with pytest.raises(ValueError, match=r"unexpected=.*\(2, 0\)"):
+        merge_rank_payloads(
+            [{"rank": 0, "rows": [
+                {"window_index": 0, "seed_index": 0},
+                {"window_index": 1, "seed_index": 0},
+                {"window_index": 2, "seed_index": 0},
+            ]}],
+            expected_window_count=2,
+            expected_seed_count=1,
+        )
+
+
+def test_rank_manifest_merge_rejects_two_ids_for_same_window_index() -> None:
+    with pytest.raises(ValueError, match="window index 0 maps to multiple window IDs"):
+        merge_rank_payloads([{"rank": 0, "rows": [
+            {"window_index": 0, "seed_index": 0, "window_id": "w0"},
+            {"window_index": 0, "seed_index": 1, "window_id": "other"},
+        ]}])
