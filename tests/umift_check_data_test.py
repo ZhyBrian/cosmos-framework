@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "examples/umift/check_data.py"
@@ -16,9 +17,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 def test_validate_batch_checks_fd_masks_and_action_spaces() -> None:
-    physical = torch.zeros(16, 10)
-    model = torch.arange(160, dtype=torch.float32).reshape(16, 10)
-    action = torch.cat((model, torch.zeros(16, 54)), dim=-1)
+    physical = torch.zeros(1, 16, 10)
+    model = torch.arange(160, dtype=torch.float32).reshape(1, 16, 10)
+    action = torch.cat((model[0], torch.zeros(16, 54)), dim=-1)
     plan = SimpleNamespace(
         has_vision=True,
         has_action=True,
@@ -28,9 +29,9 @@ def test_validate_batch_checks_fd_masks_and_action_spaces() -> None:
     )
     report = MODULE._validate_batch(
         {
-            "physical_action": [physical],
-            "action_raw": [physical.clone()],
-            "model_action": [model],
+            "physical_action": physical,
+            "action_raw": [physical[0].clone()],
+            "model_action": model,
             "action": [action],
             "action_valid_mask": [torch.tensor([True] * 10 + [False] * 54)],
             "text_token_ids": [torch.tensor([1, 2, 3])],
@@ -38,11 +39,22 @@ def test_validate_batch_checks_fd_masks_and_action_spaces() -> None:
             "episode_id": torch.tensor([3]),
             "window_start": torch.tensor([64]),
             "source_id": ["session#seg0"],
+            "video": [torch.zeros(3, 17, 256, 256)],
+            "source_indices": torch.arange(0, 34, 2).unsqueeze(0),
+            "timestamps": (torch.arange(17, dtype=torch.float64) / 15).unsqueeze(0),
         }
     )
 
     assert report["sample_id"] == (3, 64, "session#seg0")
     assert report["text_tokens"] == [1, 2, 3]
+    assert report["video_shape"] == [3, 17, 256, 256]
+    assert report["source_indices"] == list(range(0, 34, 2))
+    assert report["max_time_grid_error_ms"] == pytest.approx(0.0)
+
+
+def test_validate_batch_rejects_multi_sample_sidecar_batch() -> None:
+    with pytest.raises(AssertionError, match="physical_action must be"):
+        MODULE._single_sidecar(torch.zeros(2, 16, 10), name="physical_action", shape=(16, 10))
 
 
 def test_configure_environment_uses_cosmos_prefixed_tmp_paths(tmp_path, monkeypatch) -> None:

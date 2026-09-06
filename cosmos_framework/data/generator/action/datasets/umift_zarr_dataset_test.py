@@ -4,6 +4,7 @@ import math
 import importlib.util
 import sys
 import types
+from collections import deque
 from itertools import islice
 from pathlib import Path
 
@@ -25,6 +26,7 @@ _framewise_actions = _MODULE._framewise_actions
 _split_episode_ids = _MODULE._split_episode_ids
 get_umift_zarr_sft_dataset = _MODULE.get_umift_zarr_sft_dataset
 get_umift_dataloader_generator = _MODULE.get_umift_dataloader_generator
+get_umift_packing_dataloader = _MODULE.get_umift_packing_dataloader
 normalize_umift_action = _MODULE.normalize_umift_action
 denormalize_umift_action = _MODULE.denormalize_umift_action
 
@@ -250,6 +252,61 @@ def test_dataloader_iterator_does_not_advance_global_torch_cpu_rng(tmp_path) -> 
     next(iterator)
 
     assert torch.equal(torch.get_rng_state(), expected_state)
+
+
+def test_packing_resume_replaces_prewarm_buffer_and_old_iterator_without_global_rng_draw(
+    tmp_path, monkeypatch
+) -> None:
+    store = _make_store(tmp_path / "packing_resume.zarr", lengths=(80, 80))
+    expected_dataset = UMIFTZarrIterableDataset(store, split="train", stage="e1", seed=123, transform=None)
+    expected_dataset.set_start_iteration(20)
+    expected = next(iter(expected_dataset))["window_start"]
+
+    dataset = UMIFTZarrIterableDataset(store, split="train", stage="e1", seed=123, transform=None)
+    torch_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=None,
+        num_workers=0,
+        generator=get_umift_dataloader_generator(seed=42),
+    )
+
+    class RankLoader:
+        def __init__(self):
+            self.dataset = dataset
+
+        def __iter__(self):
+            return iter(torch_loader)
+
+    class PrewarmingPackingDataLoader:
+        def __init__(self, *, dataloader, **kwargs):
+            self.dataloader_list = [dataloader]
+            self.dataloaders = [iter(dataloader)]
+            self.buffers = [deque([next(self.dataloaders[0])])]
+            self.global_id = 0
+
+        def set_start_iteration(self, iteration):
+            self.global_id = iteration
+
+        def __iter__(self):
+            if self.buffers[0]:
+                yield self.buffers[0].popleft()
+            yield from self.dataloaders[0]
+
+    joint_module = types.ModuleType("cosmos_framework.data.generator.joint_dataloader")
+    joint_module.PackingDataLoader = PrewarmingPackingDataLoader
+    monkeypatch.setitem(sys.modules, joint_module.__name__, joint_module)
+    packing = get_umift_packing_dataloader(dataloader=RankLoader(), max_samples_per_batch=1)
+    old_iterator = packing.dataloaders[0]
+    assert packing.buffers[0][0]["window_start"] != expected
+
+    torch.manual_seed(987)
+    global_rng = torch.get_rng_state().clone()
+    packing.set_start_iteration(20)
+
+    assert torch.equal(torch.get_rng_state(), global_rng)
+    assert not packing.buffers[0]
+    assert packing.dataloaders[0] is not old_iterator
+    assert next(iter(packing))["window_start"] == expected
 
 
 def test_factory_rejects_non_forward_dynamics_mode(tmp_path) -> None:

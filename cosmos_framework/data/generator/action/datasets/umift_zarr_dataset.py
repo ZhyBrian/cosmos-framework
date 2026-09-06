@@ -489,8 +489,9 @@ def get_umift_packing_dataloader(**kwargs: Any) -> Any:
     """Build a one-sample packer that propagates trainer resume offsets to UMI-FT.
 
     With ``max_samples_per_batch=1`` the packing loop consumes exactly one source
-    window per yielded microbatch: it checks the cap before requesting another
-    sample, so no lookahead sample or prefetch cursor has to be checkpointed.
+    window per yielded microbatch.  The parent loader prewarms one sample during
+    construction; resume discards that buffer and its already-started iterator,
+    then creates a fresh iterator after restoring the dataset offset.
     """
     from cosmos_framework.data.generator.joint_dataloader import PackingDataLoader
 
@@ -505,6 +506,9 @@ def get_umift_packing_dataloader(**kwargs: Any) -> Any:
             if not isinstance(dataset, UMIFTZarrIterableDataset):
                 raise TypeError("UMI-FT packing loader expected UMIFTZarrIterableDataset")
             dataset.set_start_iteration(iteration)
+            for buffer in self.buffers:
+                buffer.clear()
+            self.dataloaders = [iter(loader) for loader in self.dataloader_list]
 
     return _ResumeAwareUMIFTPackingDataLoader(**kwargs)
 
