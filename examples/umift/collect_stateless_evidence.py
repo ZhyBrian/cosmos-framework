@@ -66,14 +66,16 @@ def _semantic_config(path: Path) -> dict[str, Any]:
     missing = [key for key in TRAINING_TREES if key not in parsed]
     if missing:
         raise ValueError(f"{path} lacks resolved training trees: {missing}")
-    def scrub(value: Any) -> Any:
+    def scrub(value: Any, prefix: str = "") -> Any:
         if isinstance(value, dict):
-            return {key: ("<allowed-job-path>" if key in _ALLOWED_PATH_KEYS else scrub(child))
+            return {key: ("<allowed-job-path>"
+                          if key in _ALLOWED_PATH_KEYS or f"{prefix}.{key}" == "trainer.callbacks.sampled_media.output_uri"
+                          else scrub(child, f"{prefix}.{key}"))
                     for key, child in value.items()}
         if isinstance(value, list):
             return [scrub(child) for child in value]
         return value
-    trees = {key: scrub(parsed[key]) for key in TRAINING_TREES}
+    trees = {key: scrub(parsed[key], key) for key in TRAINING_TREES}
     tree_digest = hashlib.sha256(json.dumps(trees, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     expected = {
         "trainer.seed": 42,
