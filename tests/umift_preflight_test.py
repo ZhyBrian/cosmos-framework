@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,13 +65,18 @@ def test_a40_env_checks_conda_prefix_python_and_component_paths(tmp_path: Path) 
     python.write_text(f"#!/usr/bin/env bash\necho '{env}/bin/python3.13'\n", encoding="utf-8")
     python.chmod(0o755)
     rewritten = tmp_path / "a40_env.sh"
-    source = ENV_PATH.read_text(encoding="utf-8").replace("/data/miniconda3", str(conda_root))
-    for original, replacement in (
-        ("/data/cosmos_conda", str(tmp_path / "cosmos_conda")),
-        ("/data/cosmos_models", str(tmp_path / "cosmos_models")),
-        ("/data/cosmos_runs", str(tmp_path / "cosmos_runs")),
-    ):
-        source = source.replace(original, replacement)
+    replacements = {
+        "/data/miniconda3": str(conda_root),
+        "/data/cosmos_conda": str(tmp_path / "cosmos_conda"),
+        "/data/cosmos_models": str(tmp_path / "cosmos_models"),
+        "/data/cosmos_runs": str(tmp_path / "cosmos_runs"),
+    }
+    # Replace once: A40's tmp_path itself lives under /data/cosmos_runs.
+    source = re.sub(
+        "|".join(re.escape(path) for path in replacements),
+        lambda match: replacements[match.group()],
+        ENV_PATH.read_text(encoding="utf-8"),
+    )
     rewritten.write_text(source, encoding="utf-8")
     result = subprocess.run(
         ["bash", "-c", f'export CUDA_VISIBLE_DEVICES=0; source "{rewritten}" && printf "%s" "$CONDA_PREFIX"'],
@@ -90,7 +96,6 @@ def test_a40_env_checks_conda_prefix_python_and_component_paths(tmp_path: Path) 
     assert rejected.returncode == 2
     assert "wrong Conda environment active" in rejected.stderr
     assert "SHOULD_NOT_RUN" not in rejected.stdout
-
 
 
 def test_local_artifacts_reject_remote_or_ambiguous_sources(tmp_path: Path) -> None:
