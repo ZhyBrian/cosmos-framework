@@ -37,7 +37,12 @@ def main() -> None:
     delta = differences(*serialized)
     assert {item["path"] for item in delta} == {
         "job.name", "dataloader_train.dataloader.datasets.umift.dataset.split",
+        "trainer.callbacks.sampled_media.output_uri",
     }, delta
+    media = next(item for item in delta if item["path"] == "trainer.callbacks.sampled_media.output_uri")
+    assert media["refit"] == media["e1"].replace(
+        "/action_fd_umift_edge_e1/", "/action_fd_umift_edge_e1_refit/"
+    ), media  # derived run path, not an independent training change
     datasets = {split: UMIFTZarrIterableDataset(os.environ["DATASET_PATH"], split=split, seed=42)
                 for split in ("train", "dev", "history", "refit_train")}
     roster = {split: [vars(ep) for ep in ds._episodes] for split, ds in datasets.items()}
