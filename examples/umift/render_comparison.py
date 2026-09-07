@@ -18,7 +18,7 @@ from examples.umift.protocol import derive_noise_seed, persistence_prediction
 
 METHODS = ("B-Persistence", "B0", "E1-A", "E1-Z", "E1-S")
 LABELS = (
-    ("真实视频 · GT", "真实观测 RGB（与模型相同预处理）"),
+    ("真实视频 · GT", "数据集 RGB 真值 · 未经 VAE 重建"),
     ("一直复制第一帧", "Persistence | 每一帧都保持真实首帧"),
     ("未微调的 Edge", "B0 | 基础权重 + 正确动作"),
     ("微调 Edge · 正确动作", "E1-A | 最佳权重：第 1000 步"),
@@ -126,7 +126,7 @@ def make_frame(panels: list[Image.Image], k: int, label: str, sample: dict,
     draw = ImageDraw.Draw(canvas)
     title, normal, small = fonts
     draw.text((16, 10), "Cosmos3 Edge · 六宫格同步视频对比", font=title, fill="#F4F7FB")
-    draw.text((16, 66), f"样本 {index}/3 | {sample['window_id']} | 生成随机种子 0", font=normal, fill="#CBD5E1")
+    draw.text((16, 66), f"样本 {index}/3 | {sample['window_id']} | 模型生成 seed=0", font=normal, fill="#CBD5E1")
     for i, ((heading, caption), image, (x, y)) in enumerate(zip(LABELS, panels, BOXES)):
         draw.text((x, y - 66), heading, font=normal, fill="#F4F7FB")
         draw.text((x, y - 29), caption, font=small, fill="#AABAD0")
