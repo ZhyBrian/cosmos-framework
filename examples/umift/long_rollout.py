@@ -300,8 +300,14 @@ def infer(args: argparse.Namespace) -> None:
                           "manifest_sha256": manifest_sha, "chunks": records, "rank": rank,
                           "initial_truth_only": True, "num_steps": 30, "sampling_seed": 0,
                           "first_frame_matches_truth": True}
-                if not args.max_chunks and not result["complete_episode"]:
-                    raise ValueError("full inference did not cover the complete episode")
+                if "start_percent" in episode:
+                    result.pop("complete_episode")
+                    result["requested_interval"] = "midstart_to_last_selected_frame"
+                    result["complete_requested_suffix"] = count == episode["frame_count"]
+                    for field in ("start_percent", "initial_selected_frame", "initial_source_frame", "parent_frame_count"):
+                        result[field] = episode[field]
+                if not args.max_chunks and count != episode["frame_count"]:
+                    raise ValueError("inference did not cover the complete requested interval")
                 (output_path.with_suffix(".json")).write_text(json.dumps(result, indent=2) + "\n")
                 results.append({"method": method, "episode": episode["episode_id"], "frames": count})
                 print(json.dumps({"rollout_done": results[-1]}), flush=True)

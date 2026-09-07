@@ -1,4 +1,4 @@
-"""Render audited full-episode six-panel Cosmos3 E1 rollout comparisons.
+"""Render audited full-episode or midstart-suffix Cosmos3 E1 comparisons.
 
 CPU only.  This consumes immutable prepared truth and saved inference arrays; it
 never imports a model, runs inference, or modifies its inputs.
@@ -80,7 +80,14 @@ def _validate_prediction_metadata(
     if record.get("method") != method or record.get("episode_id") != episode["episode_id"]:
         raise ValueError(f"{method}: method or episode identity mismatch: {path}")
     frame_count = int(episode["frame_count"])
-    if record.get("complete_episode") is not True or int(record.get("frame_count", -1)) != frame_count:
+    if "start_percent" in episode:
+        if record.get("complete_requested_suffix") is not True:
+            raise ValueError(f"{method}: requested suffix is incomplete")
+        for field in ("start_percent", "initial_selected_frame", "initial_source_frame", "parent_frame_count"):
+            if record.get(field) != episode[field]:
+                raise ValueError(f"{method}: suffix origin mismatch: {field}")
+    if (("start_percent" not in episode and record.get("complete_episode") is not True)
+            or int(record.get("frame_count", -1)) != frame_count):
         raise ValueError(f"{method}: incomplete or wrong-length episode metadata: {path}")
     if record.get("manifest_sha256") != manifest_sha256:
         raise ValueError(f"{method}: inference did not use the current prepared manifest")
@@ -128,9 +135,15 @@ def _validate_episode(episode: dict[str, Any]) -> None:
         raise ValueError("episode chunks must be a non-empty list")
     covered = 0
     for index, chunk in enumerate(chunks):
-        for key in ("output_start", "steps", "index", "noise_seed", "donor_window_id"):
+        for key in ("output_start", "steps", "index", "noise_seed"):
             if key not in chunk:
                 raise ValueError(f"chunk {index} is missing {key}")
+        if "start_percent" in episode:
+            segments = chunk.get("S_source_segments", [])
+            if sum(segment["steps"] for segment in segments) != chunk["steps"]:
+                raise ValueError("suffix S source segments do not cover chunk")
+        elif "donor_window_id" not in chunk:
+            raise ValueError("full episode chunk is missing donor_window_id")
         steps = int(chunk["steps"])
         if int(chunk["index"]) != index or int(chunk["output_start"]) != 16 * index:
             raise ValueError(f"non-canonical chunk index/output_start at chunk {index}")
@@ -139,6 +152,13 @@ def _validate_episode(episode: dict[str, Any]) -> None:
         covered += steps
     if covered != frame_count - 1:
         raise ValueError(f"chunks cover {covered} predictions, expected {frame_count - 1}")
+    if "start_percent" in episode:
+        start = episode["initial_selected_frame"]
+        parent_count = episode["parent_frame_count"]
+        if (start != episode["start_percent"] * (parent_count - 1) // 100
+                or episode["initial_source_frame"] != 2 * start
+                or frame_count != parent_count - start):
+            raise ValueError("suffix origin and frame count disagree")
 
 
 def _font_set(font_path: Path) -> tuple[ImageFont.FreeTypeFont, ...]:
@@ -203,21 +223,33 @@ def _make_frame(
     total = int(episode["frame_count"])
     block = _chunk_for_frame(episode["chunks"], frame_index)
     block_text = "初始真实条件" if block is None else f"block {block} · 生成自反馈"
-    draw.text((16, 10), "Cosmos3 Edge · 全长开放环六宫格对比", font=title, fill="#F4F7FB")
+    midstart = "start_percent" in episode
+    heading = (f"Cosmos3 Edge · 从 {episode['start_percent']}% 帧开始预测至末尾" if midstart
+               else "Cosmos3 Edge · 全长开放环六宫格对比")
+    draw.text((16, 10), heading, font=title, fill="#F4F7FB")
     draw.text(
         (16, 66),
         f"样本 {sample_index}/3 | episode {episode['episode_id']} | {episode['raw_session']}",
         font=normal,
         fill="#CBD5E1",
     )
-    for (heading, caption), panel, (x, y) in zip(LABELS, _panels_at(truth, predictions, frame_index), BOXES):
+    labels = list(LABELS)
+    if midstart:
+        labels[1] = ("一直复制新输入帧", "Persistence · 33% / 67% 起点保持")
+        labels[5] = ("微调 Edge · 错配动作", "E1-S · 原冻结动作流的后缀")
+    for (heading, caption), panel, (x, y) in zip(labels, _panels_at(truth, predictions, frame_index), BOXES):
         draw.text((x, y - 66), heading, font=normal, fill="#F4F7FB")
         draw.text((x, y - 29), caption, font=small, fill="#AABAD0")
         canvas.paste(panel, (x, y))
         draw.rectangle((x - 1, y - 1, x + PANEL_SIZE, y + PANEL_SIZE), outline="#597187", width=1)
+    timeline = f"帧 {frame_index}/{total - 1} | 实际 t={elapsed_seconds:.3f} 秒 | 模型 15 Hz | {block_text}"
+    if midstart:
+        episode_time = elapsed_seconds + episode["initial_episode_elapsed_seconds"]
+        timeline = (f"本段帧 {frame_index}/{total - 1} | 本段 {elapsed_seconds:.3f}s | "
+                    f"原 episode {episode_time:.3f}s | 模型 15 Hz | {block_text}")
     draw.text(
         (16, 1310),
-        f"帧 {frame_index}/{total - 1} | 实际 t={elapsed_seconds:.3f} 秒 | 模型 15 Hz | {block_text}",
+        timeline,
         font=small,
         fill="#F5D28B",
     )
@@ -226,6 +258,9 @@ def _make_frame(
         if frame_index == 0
         else "此后模型格均为逐块生成结果；块间仅传递上一块末帧，不重置为真实帧。"
     )
+    if midstart and frame_index == 0:
+        note = (f"新观测：原采样帧 {episode['initial_selected_frame']} / {episode['parent_frame_count'] - 1}，"
+                f"Zarr 原始帧 {episode['initial_source_frame']}；六格共享，随后仅生成自反馈。")
     draw.text((16, 1354), note, font=small, fill="#CBD5E1")
     return canvas
 
@@ -396,6 +431,20 @@ def _write_html(destination: Path, inventory: dict[str, Any]) -> Path:
         + '<p>MP4 使用 H.264/yuv420p 有损编码，仅用于目视评估；预测源数组未被覆盖。'
         '<a href="inventory.json">查看输入输出哈希与逐块审计信息</a>。</p></body></html>'
     )
+    if "start_percent" in inventory:
+        percent = inventory["start_percent"]
+        content = content.replace("全长六宫格评估", f"{percent}% 新起点六宫格评估")
+        content = content.replace("三个 history episode 全长开放环比较", f"三个 history episode 从 {percent}% 帧至末尾的开放环比较")
+        content = content.replace("六格在全局第 0 帧共享同一张真实 I0", "六格在本段第 0 帧共享同一张新的真实观测帧")
+        content = content.replace("E1-S 输入逐块错配动作", "E1-S 输入原 P8 冻结错配动作流的对应后缀（新块可能跨两个旧 donor）")
+        details = "".join(
+            f"<li>episode {e['episode_id']}：原采样帧 {e['initial_selected_frame']}/{e['parent_frame_count'] - 1}，"
+            f"Zarr 原始帧 {e['initial_source_frame']}；新起点位于原 episode t={e['initial_episode_elapsed_seconds']:.3f}s，"
+            f"剩余实际跨度 {e['actual_timestamp_span_seconds']:.3f}s。</li>"
+            for e in inventory["episodes"]
+        )
+        content = content.replace("</h1>", "</h1><p>百分比按 stride=2 帧索引进度向下取整，"
+                                  "不按名义 15 Hz 推算采集时间。GT 只显示同一剩余段。</p><ul>" + details + "</ul>", 1)
     path = destination / "index.html"
     path.write_text(content)
     return path
@@ -443,6 +492,14 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
         protected_paths.update((truth_path, frame_indices_path))
         frame_count = int(episode["frame_count"])
         elapsed = _load_timestamps(frame_indices_path, frame_count)
+        if "start_percent" in episode:
+            with np.load(frame_indices_path, allow_pickle=False) as times:
+                expected_indices = np.arange(episode["initial_source_frame"], episode["source_length"], 2)
+                if not np.array_equal(times["source_indices"], expected_indices):
+                    raise ValueError("suffix timestamps have different source indices")
+                initial_elapsed = float(times["timestamps"][0] - episode["original_episode_first_timestamp"])
+                if abs(initial_elapsed - episode["initial_episode_elapsed_seconds"]) > 1e-9:
+                    raise ValueError("suffix displayed episode time differs from source timestamp")
         declared_span = episode.get("actual_timestamp_span_seconds")
         if declared_span is not None and abs(float(declared_span) - float(elapsed[-1])) > 1e-9:
             raise ValueError("manifest actual_timestamp_span_seconds differs from timestamp archive")
@@ -511,6 +568,12 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
         ],
         "episodes": [],
     }
+    if "start_percent" in manifest:
+        if any(e.get("start_percent") != manifest["start_percent"] for e in episodes):
+            raise ValueError("mixed suffix origins within one video group")
+        inventory.update(protocol="midstart_suffix_open_loop_action_fd", start_percent=manifest["start_percent"],
+                         conditioning="all panels share the new observed start frame; no later GT reset",
+                         parent_manifest_sha256=manifest["parent_manifest_sha256"])
     for sample_index, item in enumerate(prepared, start=1):
         episode = item["manifest"]
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(episode["episode_id"]))
