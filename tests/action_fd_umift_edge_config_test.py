@@ -84,6 +84,19 @@ def test_recipe_has_exact_edge_training_contract() -> None:
         assert fragment in source, fragment
 
 
+def test_refit_recipe_changes_only_experiment_and_run_identity() -> None:
+    original = tomllib.loads(TOML.read_text())
+    refit = tomllib.loads(TOML.with_name("action_fd_umift_edge_refit.toml").read_text())
+    assert refit["job"]["experiment"] == "action_fd_umift_edge_refit"
+    assert refit["job"]["name"] == "action_fd_umift_edge_e1_refit"
+    refit["job"]["experiment"] = original["job"]["experiment"]
+    refit["job"]["name"] = original["job"]["name"]
+    assert refit == original
+    source = _source()
+    assert "action_fd_umift_edge_refit = copy.deepcopy(action_fd_umift_edge)" in source
+    assert 'action_fd_umift_edge_refit.dataloader_train.dataloader.datasets.umift.dataset.split = "refit_train"' in source
+
+
 def test_toml_and_launcher_expose_safe_stage_profiles() -> None:
     raw = tomllib.loads(TOML.read_text(encoding="utf-8"))
     assert raw["job"]["experiment"] == "action_fd_umift_edge"

@@ -21,6 +21,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 HISTORY_EPISODES = (13, 43, 49)
 TRAIN_EPISODES = tuple(i for i in range(50) if i not in HISTORY_EPISODES)
 DEV_EPISODES = tuple(range(50, 59))
+REFIT_TRAIN_EPISODES = tuple(i for i in range(59) if i not in HISTORY_EPISODES)
 
 _SOURCE_STRIDE = 2
 _VIDEO_FRAMES = 17
@@ -124,12 +125,14 @@ def _split_episode_ids(split: str, episode_count: int = 59) -> tuple[int, ...]:
     split_key = split.lower()
     if split_key == "train":
         selected = TRAIN_EPISODES
+    elif split_key == "refit_train":
+        selected = REFIT_TRAIN_EPISODES
     elif split_key in ("dev", "val", "validation"):
         selected = DEV_EPISODES
     elif split_key == "history":
         selected = HISTORY_EPISODES
     else:
-        raise ValueError("split must be one of: train, dev, history")
+        raise ValueError("split must be one of: train, refit_train, dev, history")
     return tuple(i for i in selected if i < episode_count)
 
 
@@ -228,7 +231,7 @@ class UMIFTZarrIterableDataset(IterableDataset):
             return 1
         if self.stage == "overfit":
             return sum(start + _SOURCE_SPAN < self._episodes[0].length for start in _OVERFIT_STARTS)
-        if self.split != "train":
+        if self.split not in ("train", "refit_train"):
             return sum(len(range(0, episode.window_count, _EVAL_START_STEP)) for episode in self._episodes)
         return self.total_images
 
@@ -317,7 +320,7 @@ class UMIFTZarrIterableDataset(IterableDataset):
         if not 0 <= global_shard < total_shards:
             raise ValueError("invalid shard_rank/shard_world_size")
 
-        if self.stage == "e1" and self.split == "train":
+        if self.stage == "e1" and self.split in ("train", "refit_train"):
             draws = self._training_draws(self._next_draw_index)
         elif self.stage in ("smoke", "overfit"):
             windows = self._finite_windows()

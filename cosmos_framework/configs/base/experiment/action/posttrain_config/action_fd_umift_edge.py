@@ -195,3 +195,14 @@ ConfigStore.instance().store(
     name="action_fd_umift_edge",
     node=action_fd_umift_edge,
 )
+
+# E1-R changes only the training population and run identity. Keep E1 intact.
+action_fd_umift_edge_refit = copy.deepcopy(action_fd_umift_edge)
+action_fd_umift_edge_refit.job.name = "action_fd_umift_edge_e1_refit"
+action_fd_umift_edge_refit.dataloader_train.dataloader.datasets.umift.dataset.split = "refit_train"
+ConfigStore.instance().store(
+    group="experiment",
+    package="_global_",
+    name="action_fd_umift_edge_refit",
+    node=action_fd_umift_edge_refit,
+)

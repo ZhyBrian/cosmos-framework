@@ -128,6 +128,33 @@ def test_split_contract_excludes_history_from_training() -> None:
     assert set(TRAIN_EPISODES).isdisjoint(HISTORY_EPISODES)
 
 
+def test_refit_split_adds_all_dev_without_changing_e1() -> None:
+    refit = _split_episode_ids("refit_train", 59)
+    assert refit == tuple(i for i in range(59) if i not in (13, 43, 49))
+    assert len(refit) == 56
+    assert set(refit) == set(TRAIN_EPISODES) | set(range(50, 59))
+    assert _split_episode_ids("train", 59) == tuple(i for i in range(50) if i not in (13, 43, 49))
+
+
+def test_refit_uses_infinite_random_training_stream_and_rank_partition(tmp_path, monkeypatch) -> None:
+    root = zarr.open_group(str(tmp_path / "refit.zarr"), mode="w")
+    for episode_id in (0, 13, 43, 49, 50, 58):
+        _write_episode(root, episode_id, 40)
+    monkeypatch.setattr(
+        UMIFTZarrIterableDataset, "_load_window", lambda self, episode, start: (episode.episode_id, start)
+    )
+    dataset = UMIFTZarrIterableDataset(str(root.store.path), split="refit_train")
+    assert len(dataset) == 3 * 8
+    expected = [(ep.episode_id, start) for _, ep, start in islice(dataset._training_draws(0), 128)]
+    actual = list(islice(iter(dataset), 128))
+    assert actual == expected  # finite validation enumeration would stop after three draws
+    assert {ep for ep, _ in actual} == {0, 50, 58}
+    for rank in range(4):
+        sharded = UMIFTZarrIterableDataset(str(root.store.path), split="refit_train")
+        sharded.shard_world_size, sharded.shard_rank = 4, rank
+        assert list(islice(iter(sharded), 32)) == expected[rank::4]
+
+
 def test_window_never_crosses_episode_and_preserves_source_metadata(tmp_path) -> None:
     store = _make_store(tmp_path / "tiny.zarr")
     dataset = UMIFTZarrIterableDataset(store, split="train", stage="smoke", transform=None)
