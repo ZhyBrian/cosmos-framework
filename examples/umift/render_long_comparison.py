@@ -226,6 +226,8 @@ def _make_frame(
     midstart = "start_percent" in episode
     heading = (f"Cosmos3 Edge · 从 {episode['start_percent']}% 帧开始预测至末尾" if midstart
                else "Cosmos3 Edge · 全长开放环六宫格对比")
+    if episode.get("experiment_id") == "E1-R":
+        heading = heading.replace("Cosmos3 Edge", "Edge E1-R · 56段训练")
     draw.text((16, 10), heading, font=title, fill="#F4F7FB")
     draw.text(
         (16, 66),
@@ -237,6 +239,8 @@ def _make_frame(
     if midstart:
         labels[1] = ("一直复制新输入帧", "Persistence · 33% / 67% 起点保持")
         labels[5] = ("微调 Edge · 错配动作", "E1-S · 原冻结动作流的后缀")
+    if episode.get("experiment_id") == "E1-R":
+        labels = [(heading, caption.replace("E1-", "E1-R-")) for heading, caption in labels]
     for (heading, caption), panel, (x, y) in zip(labels, _panels_at(truth, predictions, frame_index), BOXES):
         draw.text((x, y - 66), heading, font=normal, fill="#F4F7FB")
         draw.text((x, y - 29), caption, font=small, fill="#AABAD0")
@@ -445,6 +449,10 @@ def _write_html(destination: Path, inventory: dict[str, Any]) -> Path:
         )
         content = content.replace("</h1>", "</h1><p>百分比按 stride=2 帧索引进度向下取整，"
                                   "不按名义 15 Hz 推算采集时间。GT 只显示同一剩余段。</p><ul>" + details + "</ul>", 1)
+    if inventory.get("experiment_id") == "E1-R":
+        content = content.replace("Cosmos3 E1 ", "Cosmos3 E1-R ").replace("E1-A", "E1-R-A").replace("E1-Z", "E1-R-Z").replace("E1-S", "E1-R-S")
+        content = content.replace("</h1>", "</h1><p><strong>E1-R：56段训练，固定第1000步。</strong>"
+                                  "训练使用0–58除13、43、49；这三段仅用于测试参考，不参与训练或权重选择。</p>", 1)
     path = destination / "index.html"
     path.write_text(content)
     return path
@@ -568,6 +576,9 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
         ],
         "episodes": [],
     }
+    if manifest.get("experiment_id") == "E1-R":
+        inventory["experiment_id"] = "E1-R"
+        inventory["checkpoint_selection_rule"] = manifest["checkpoint_selection_rule"]
     if "start_percent" in manifest:
         if any(e.get("start_percent") != manifest["start_percent"] for e in episodes):
             raise ValueError("mixed suffix origins within one video group")
