@@ -10,6 +10,12 @@ from pathlib import Path
 from examples.umift.long_rollout import BASE_CHECKPOINT, BEST_CHECKPOINT, EPISODES, file_sha
 
 
+def read_frozen_fixture(path: Path, expected_sha256: str) -> dict:
+    if file_sha(path) != expected_sha256:
+        raise ValueError("parent manifest differs from the previously audited fixture SHA256")
+    return json.loads(path.read_text())
+
+
 def bind_checkpoint(parent: dict, checkpoint: Path, iteration: int) -> dict:
     if iteration not in (500, 1000):
         raise ValueError("only reference step500 and preregistered final step1000 are used")
@@ -26,6 +32,7 @@ def bind_checkpoint(parent: dict, checkpoint: Path, iteration: int) -> dict:
     result["selected_checkpoint"] = str(checkpoint)
     result["experiment_id"] = "E1-R"
     result["checkpoint_iteration"] = iteration
+    result["reference_only"] = iteration == 500
     result["checkpoint_selection_rule"] = "fixed1000; step500 reference only; no test-driven selection or tuning"
     for episode in result["episodes"]:
         episode["experiment_id"] = "E1-R"
@@ -37,13 +44,15 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--checkpoint-model", type=Path, required=True)
+    parser.add_argument("--expected-fixture-sha256", required=True,
+                        help="Previously audited parent manifest hash (including chunk plan and noise seeds)")
     parser.add_argument("--iteration", type=int, choices=(500, 1000), default=1000)
     args = parser.parse_args()
     source = args.source_root.resolve() / "prepared/manifest.json"
     checkpoint = args.checkpoint_model.resolve()
     if not (checkpoint / ".metadata").is_file():
         raise FileNotFoundError(checkpoint / ".metadata")
-    parent = json.loads(source.read_text())
+    parent = read_frozen_fixture(source, args.expected_fixture_sha256)
     manifest = bind_checkpoint(parent, checkpoint, args.iteration)
     for episode in manifest["episodes"]:
         for filename, expected in episode["input_files_sha256"].items():

@@ -234,6 +234,7 @@ def infer(args: argparse.Namespace) -> None:
     manifest_path = args.root / "prepared/manifest.json"
     manifest_sha = file_sha(manifest_path)
     manifest = json.loads(manifest_path.read_text())
+    validate_reference_scope(manifest, args.max_chunks)
     checkpoint = Path(manifest["base_checkpoint"] if args.phase == "base" else manifest["selected_checkpoint"])
     model, resolved, load_evidence = load_edge_fd_model(args.sft_toml, checkpoint, independent_windows=True)
     validate_independent_parallelism(model.parallel_dims)
@@ -322,6 +323,11 @@ def infer(args: argparse.Namespace) -> None:
     (output_root / f"run_{args.phase}_rank{rank}.json").write_text(json.dumps(report, indent=2) + "\n")
     torch.distributed.barrier()
     torch.distributed.destroy_process_group()
+
+
+def validate_reference_scope(manifest: dict, max_chunks: int) -> None:
+    if manifest.get("reference_only") and not 1 <= max_chunks <= 2:
+        raise ValueError("reference-only checkpoint requires a 1-2 chunk probe, never a full rollout")
 
 
 def main() -> None:
