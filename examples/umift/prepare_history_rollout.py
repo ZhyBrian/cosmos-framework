@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from examples.umift.long_rollout import BASE_CHECKPOINT, EPISODES, file_sha
+from examples.umift.history_selection import choose_candidate
 
 
 PARENTS = {
@@ -29,6 +30,19 @@ def main() -> None:
     history_frames = selection["history_frames"]
     iteration = selection["iteration"]
     checkpoint = Path(selection["checkpoint"])
+    protocol_file = Path(selection["protocol_file"])
+    if (file_sha(protocol_file) != selection["protocol_sha256"]
+            or selection["selection_uses_test_episodes"] is not True):
+        raise ValueError("selected checkpoint lacks matching frozen selection protocol")
+    reports = []
+    for candidate in selection["candidates"]:
+        path = Path(candidate["file"])
+        if file_sha(path) != candidate["sha256"]:
+            raise ValueError("candidate metrics changed after selection")
+        reports.append(json.loads(path.read_text()))
+    best = choose_candidate(reports, selection["protocol_sha256"], history_frames)
+    if (best["iteration"], best["checkpoint"]) != (iteration, str(checkpoint)):
+        raise ValueError("selected checkpoint is not the declared metric minimum")
     if history_frames not in (1, 5, 9, 17) or iteration not in (500, 1000, 1500, 2000, 2500, 3000):
         raise ValueError("unexpected selected H/iteration")
     if (checkpoint.name != "model" or checkpoint.parent.name != f"iter_{iteration:09d}"
@@ -61,6 +75,8 @@ def main() -> None:
             anchor = int(archive["source_indices"][0])
         episode.update(experiment_id="E2-H", history_frames=history_frames, selected_iteration=iteration)
         if args.start_percent == 0:
+            if anchor != 0:
+                raise ValueError("the full-episode fixture must begin at source frame zero")
             episode.update(start_percent=0, initial_selected_frame=0, initial_source_frame=anchor,
                            initial_episode_elapsed_seconds=0.0, parent_frame_count=episode["frame_count"])
         elif episode["start_percent"] != args.start_percent or episode["initial_source_frame"] != anchor:

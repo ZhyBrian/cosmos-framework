@@ -55,22 +55,94 @@ def compose_frame(truth, predictions, index: int, elapsed: float, episode: dict,
     return image
 
 
+def _panels_at(truth, predictions, index: int) -> list[np.ndarray]:
+    return [truth[index], truth[0], *(predictions[method][index] for method in METHODS)]
+
+
 def _encode(path: Path, truth, predictions, episode, elapsed, history_frames):
     import av
 
     clock = Fraction(1, 1_000_000)
+    durations = np.r_[np.diff(elapsed), elapsed[-1] - elapsed[-2]]
     with av.open(str(path), "w", options={"movflags": "+faststart"}) as container:
         stream = container.add_stream("libx264", rate=15, options={"crf": "16", "bf": "0"})
         stream.width, stream.height, stream.pix_fmt, stream.time_base = WIDTH, HEIGHT, "yuv420p", clock
+        stream.codec_context.time_base = clock
+
+        def mux(packet) -> None:
+            if packet.pts is None or packet.time_base is None:
+                raise ValueError("encoder returned packet without presentation time")
+            packet_time = float(packet.pts * packet.time_base)
+            index = int(np.argmin(np.abs(elapsed - packet_time)))
+            if abs(float(elapsed[index]) - packet_time) > 0.001:
+                raise ValueError("encoder changed a source presentation timestamp")
+            packet.duration = max(1, round(float(durations[index]) / float(packet.time_base)))
+            container.mux(packet)
+
         for index in range(len(elapsed)):
             frame = av.VideoFrame.from_image(
                 compose_frame(truth, predictions, index, float(elapsed[index]), episode, history_frames)
             )
             frame.pts, frame.time_base = round(float(elapsed[index]) * 1_000_000), clock
             for packet in stream.encode(frame):
-                container.mux(packet)
+                mux(packet)
         for packet in stream.encode():
-            container.mux(packet)
+            mux(packet)
+
+
+def _verify_video(path: Path, truth, predictions, episode, elapsed) -> dict:
+    import av
+
+    expected_count = int(episode["frame_count"])
+    inspect = {0, expected_count // 2, expected_count - 1}
+    decoded_count = 0
+    max_pts_error = 0.0
+    max_panel_mae = 0.0
+    last_duration = None
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        observed = (stream.width, stream.height, stream.codec_context.name, stream.codec_context.format.name)
+        if observed != (WIDTH, HEIGHT, "h264", "yuv420p"):
+            raise ValueError(f"unexpected history video properties: {observed}")
+        for decoded_count, frame in enumerate(container.decode(video=0), start=1):
+            index = decoded_count - 1
+            if index >= expected_count or frame.pts is None:
+                raise ValueError("unexpected decoded frame or missing PTS")
+            pts_error = abs(float(frame.pts * frame.time_base) - float(elapsed[index]))
+            max_pts_error = max(max_pts_error, pts_error)
+            if pts_error > 0.001:
+                raise ValueError(f"PTS differs from source by {pts_error:.6f}s at frame {index}")
+            if index in inspect:
+                rgb = frame.to_ndarray(format="rgb24")
+                for expected, (x, y) in zip(_panels_at(truth, predictions, index), BOXES, strict=True):
+                    expected_rgb = np.asarray(expected)
+                    if np.issubdtype(expected_rgb.dtype, np.floating):
+                        expected_rgb = np.rint(expected_rgb * 255).clip(0, 255)
+                    patch = rgb[y : y + PANEL_SIZE, x : x + PANEL_SIZE].astype(np.float32)
+                    mae = float(np.abs(patch - expected_rgb.astype(np.float32)).mean())
+                    max_panel_mae = max(max_panel_mae, mae)
+                    if mae > 3.0:
+                        raise ValueError(f"encoded history panel MAE {mae:.4f} at frame {index}")
+            if index == expected_count - 1 and frame.duration is not None:
+                last_duration = float(frame.duration * frame.time_base)
+    if decoded_count != expected_count:
+        raise ValueError(f"decoded {decoded_count} frames, expected {expected_count}")
+    expected_last_duration = float(elapsed[-1] - elapsed[-2])
+    if last_duration is None or abs(last_duration - expected_last_duration) > 0.001:
+        raise ValueError(f"last frame duration {last_duration} differs from source {expected_last_duration}")
+    return {
+        "frame_count": decoded_count,
+        "frame_pts_seconds": np.asarray(elapsed, dtype=float).tolist(),
+        "actual_timestamp_span_seconds": float(elapsed[-1]),
+        "last_frame_duration_seconds": last_duration,
+        "expected_container_duration_seconds": float(elapsed[-1] + expected_last_duration),
+        "max_pts_error_seconds": max_pts_error,
+        "max_panel_mae_0_255": max_panel_mae,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "width": WIDTH,
+        "height": HEIGHT,
+    }
 
 
 def render(root: Path, history_frames: int, output_dir: Path) -> dict:
@@ -125,6 +197,7 @@ def render(root: Path, history_frames: int, output_dir: Path) -> dict:
             }
         video = output_dir / "videos" / f"episode_{episode['episode_id']}_start_{label}.mp4"
         _encode(video, truth, predictions, episode, elapsed, history_frames)
+        video_verification = _verify_video(video, truth, predictions, episode, elapsed)
         posters = {}
         for name, index in (("start", 0), ("mid", count // 2), ("end", count - 1)):
             path = output_dir / "posters" / f"episode_{episode['episode_id']}_{name}.png"
@@ -133,7 +206,8 @@ def render(root: Path, history_frames: int, output_dir: Path) -> dict:
         item = {
             **episode,
             "sources": sources,
-            "video": {"file": str(video.relative_to(output_dir)), "sha256": file_sha(video)},
+            "video": {"file": str(video.relative_to(output_dir)), "sha256": file_sha(video),
+                      "verification": video_verification},
             "posters": posters,
         }
         inventory["episodes"].append(item)

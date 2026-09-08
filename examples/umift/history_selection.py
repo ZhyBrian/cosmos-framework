@@ -14,6 +14,12 @@ from examples.umift.long_rollout import EPISODES, array_sha, file_sha
 from examples.umift.protocol import derive_noise_seed
 
 
+def validate_candidate_identity(checkpoint: Path, history_frames: int, iteration: int) -> None:
+    if (checkpoint.name != "model" or checkpoint.parent.name != f"iter_{iteration:09d}"
+            or f"action_fd_umift_edge_h{history_frames}" not in checkpoint.parts):
+        raise ValueError("checkpoint does not belong to the requested H/iteration")
+
+
 def freeze(zarr_path: Path, output: Path) -> None:
     import zarr
 
@@ -53,10 +59,12 @@ def infer(args: argparse.Namespace) -> None:
     init_script()
     protocol_sha = file_sha(args.protocol)
     protocol = json.loads(args.protocol.read_text())
+    if (protocol.get("protocol") != "e2-history-selection-v1" or args.history_frames not in protocol["histories"]
+            or protocol["selection_uses_test_episodes"] is not True):
+        raise ValueError("unexpected E2-H selection protocol")
     if args.iteration not in protocol["iterations"]:
         raise ValueError("iteration is not a preregistered candidate")
-    if args.checkpoint.parent.name != f"iter_{args.iteration:09d}" or args.checkpoint.name != "model":
-        raise ValueError("checkpoint path does not match candidate iteration")
+    validate_candidate_identity(args.checkpoint, args.history_frames, args.iteration)
     model, resolved, evidence = load_history_model(args.sft_toml, args.checkpoint, args.history_frames)
     validate_independent_parallelism(model.parallel_dims)
     dataset = get_umift_history_sft_dataset(
@@ -127,6 +135,7 @@ def score(args: argparse.Namespace) -> None:
     aggregate = aggregate_session_equal([{"raw_session": r["raw_session"], "metrics": {
         **r["metrics"]["mean"], "temporal_l1": r["metrics"]["temporal"]["mean_l1"]}} for r in results])
     history_frames, iteration, checkpoint = next(iter(identity))
+    validate_candidate_identity(Path(checkpoint), history_frames, iteration)
     report = {"history_frames": history_frames, "iteration": iteration, "checkpoint": checkpoint,
               "protocol_sha256": protocol_sha, "selection_uses_test_episodes": True,
               "session_equal_aggregate": aggregate, "windows": results}
@@ -141,6 +150,7 @@ def choose_candidate(reports: list[dict], protocol_sha: str, history_frames: int
     if sorted(r["iteration"] for r in reports) != [500, 1000, 1500, 2000, 2500, 3000]:
         raise ValueError("selection requires all six distinct preregistered candidates")
     for report in reports:
+        validate_candidate_identity(Path(report["checkpoint"]), history_frames, report["iteration"])
         if report["protocol_sha256"] != protocol_sha or report["history_frames"] != history_frames:
             raise ValueError("candidate H/protocol differs")
         if not math.isfinite(report["session_equal_aggregate"]["overall"]["lpips"]):
@@ -159,6 +169,7 @@ def choose(args: argparse.Namespace) -> None:
         raise FileExistsError(output)
     result = {"history_frames": args.history_frames, "iteration": selected["iteration"],
               "checkpoint": selected["checkpoint"], "protocol_sha256": protocol_sha,
+              "protocol_file": str(args.protocol.resolve()),
               "selection_uses_test_episodes": True,
               "candidates": [{"iteration": r["iteration"], "metrics": r["session_equal_aggregate"]["overall"],
                                "file": str(p), "sha256": file_sha(p)} for p, r in zip(paths, reports, strict=True)]}
