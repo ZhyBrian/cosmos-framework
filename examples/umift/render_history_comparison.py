@@ -167,6 +167,7 @@ def _verify_video(path: Path, truth, predictions, episode, elapsed) -> dict:
 
 def render(root: Path, history_frames: int, output_dir: Path) -> dict:
     manifest_path = root / "prepared/manifest.json"
+    manifest_sha = file_sha(manifest_path)
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("experiment_id") != "E2-H" or manifest.get("history_frames") != history_frames:
         raise ValueError("manifest does not match E2-H/history_frames")
@@ -193,8 +194,16 @@ def render(root: Path, history_frames: int, output_dir: Path) -> dict:
         for method in METHODS:
             base = inference_root / method / f"episode_{episode['episode_id']}_start_{label}"
             metadata = json.loads(base.with_suffix(".json").read_text())
+            expected_checkpoint = manifest["base_checkpoint"] if method == "B0" else manifest["selected_checkpoint"]
+            if (metadata.get("checkpoint_id") != expected_checkpoint
+                    or metadata.get("manifest_sha256") != manifest_sha
+                    or metadata.get("method") != method or metadata.get("episode_id") != episode["episode_id"]
+                    or metadata.get("start_percent") != episode["start_percent"]):
+                raise ValueError(f"{method} checkpoint or suffix identity differs from the manifest")
             if metadata.get("history_frames") != history_frames or not metadata.get("complete_requested_suffix"):
                 raise ValueError(f"incomplete/mismatched {method} metadata")
+            if len(metadata["chunks"]) != len(episode["chunks"]):
+                raise ValueError(f"{method} does not cover all frozen chunks")
             true_pts = np.asarray(metadata.get("true_pts"), dtype=np.float64)
             if true_pts.shape != (count,) or not np.allclose(true_pts - true_pts[0], elapsed, atol=1e-9):
                 raise ValueError(f"{method} metadata true PTS differ from the frozen archive")
