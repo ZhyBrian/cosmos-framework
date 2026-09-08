@@ -1,0 +1,57 @@
+# Cosmos3-Edge UMI-FT RGB/action forward dynamics with a 17-frame RGB history.
+
+[job]
+task       = "vfm"
+experiment = "action_fd_umift_edge_h17"
+project    = "cosmos3_action_fd_umift"
+group      = "action_sft"
+name       = "action_fd_umift_edge_h17"
+wandb_mode = "disabled"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 4
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode = "selective"
+
+[model.compile]
+enabled = false
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+betas        = [0.9, 0.99]
+eps          = 1.0e-8
+lr           = 1.0e-5
+weight_decay = 0.05
+
+[scheduler]
+cycle_lengths = [3000]
+f_max         = [1.0]
+f_min         = [0.1]
+f_start       = [0.0]
+warm_up_steps = [100]
+
+[trainer]
+grad_accum_iter = 4
+max_iter       = 3000
+logging_iter   = 10
+
+[trainer.callbacks.compile_tokenizer]
+enabled = false
+
+[trainer.callbacks.grad_clip]
+clip_norm    = 1.0
+force_finite = true
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500
+
+[dataloader_train]
+max_samples_per_batch = 1

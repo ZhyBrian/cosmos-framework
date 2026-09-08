@@ -22,16 +22,24 @@ _TARGET_BYTES = 24 * 1024**3
 _OUTPUT_BASE = Path("/data/cosmos_runs")
 _TOML = Path(__file__).resolve().parents[1] / "toml/sft_config/action_fd_umift_edge_refit.toml"
 _JOB_NAME = "action_fd_umift_edge_e1_refit_single24"
-_OVERRIDES = (
+_OVERRIDE_PREFIX = (
     "model.config.parallelism.data_parallel_shard_degree=1",
     "model.config.parallelism.data_parallel_replicate_degree=1",
-    "trainer.grad_accum_iter=16",
+)
+_OVERRIDE_SUFFIX = (
     "trainer.max_iter=2",
     "checkpoint.save_iter=2",
     f"job.name={_JOB_NAME}",
     "trainer.logging_iter=1",
     "trainer.callbacks.device_monitor.every_n=1",
 )
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -41,6 +49,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         required=True,
         help="New, dedicated output root below /data/cosmos_runs.",
+    )
+    parser.add_argument(
+        "--grad-accum-iter",
+        type=_positive_int,
+        default=16,
+        help="Gradient accumulation iterations for this resource probe (default: 16).",
     )
     return parser.parse_args(argv)
 
@@ -76,6 +90,11 @@ def _validate_launch(output_root: Path) -> Path:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     output_root = _validate_launch(args.output_root)
+    overrides = (
+        *_OVERRIDE_PREFIX,
+        f"trainer.grad_accum_iter={args.grad_accum_iter}",
+        *_OVERRIDE_SUFFIX,
+    )
 
     import torch
 
@@ -105,11 +124,12 @@ def main(argv: list[str] | None = None) -> None:
         "allocator_target_gib": _TARGET_BYTES / 1024**3,
         "allocator_fraction": fraction,
         "world_size": 1,
+        "grad_accum_iter": args.grad_accum_iter,
         "output_root": str(output_root),
         "toml": str(_TOML),
         "job_name": _JOB_NAME,
         "cosmos_exit_without_finalize": True,
-        "overrides": list(_OVERRIDES),
+        "overrides": list(overrides),
         "resource_evidence": (
             "Capture whole-process GPU memory with an external NVML sampler and retain the "
             "training log. The PyTorch caching-allocator cap excludes some CUDA context, "
@@ -122,7 +142,7 @@ def main(argv: list[str] | None = None) -> None:
         "cosmos_framework.scripts.train",
         f"--sft-toml={_TOML}",
         "--",
-        *_OVERRIDES,
+        *overrides,
     ]
     runpy.run_module("cosmos_framework.scripts.train", run_name="__main__")
 
