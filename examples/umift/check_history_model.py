@@ -166,6 +166,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         latent_prefix_frames = len(expected_condition_indexes)
         full_prefix = full_latent[:, :, :latent_prefix_frames]
         perturb_prefix_comparison = _comparison(full_prefix, perturbed_latent[:, :, :latent_prefix_frames])
+        if not perturb_prefix_comparison.get("shape_equal"):
+            raise AssertionError(
+                f"future RGB changed the encoded history-prefix shape: {perturb_prefix_comparison}"
+            )
+        if perturb_prefix_comparison["max_abs"] != 0.0:
+            raise AssertionError(
+                f"future RGB leaked into the encoded history prefix: {perturb_prefix_comparison}"
+            )
         history_encode_comparison = _comparison(full_prefix, history_latent)
 
         batch = _move_batch_to_cuda(build_history_batch(sample))
