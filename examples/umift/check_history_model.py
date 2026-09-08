@@ -105,7 +105,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         run_history_prediction,
         validate_history_sample,
     )
-    from examples.umift.infer import _move_batch_to_cuda
+    from examples.umift.infer import _move_batch_to_cuda, validate_independent_parallelism
 
     model, resolved, load_evidence = load_history_model(
         args.sft_toml,
@@ -114,6 +114,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         independent_windows=True,
     )
     model.eval()
+    validate_independent_parallelism(model.parallel_dims)
     if not callable(getattr(model, "encode", None)) or not callable(getattr(model, "decode", None)):
         raise TypeError("loaded history model must expose callable encode and decode methods")
     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() != 4:
@@ -261,21 +262,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _validate_launch(args)
-    report = run(args)
-
     import torch
 
-    rank = int(report["rank"])
-    if rank == 0:
-        args.output.mkdir(parents=True)
-    torch.distributed.barrier()
-    output_path = args.output / f"rank_{rank}.json"
-    output_path.write_text(
-        json.dumps(report, indent=2, sort_keys=True, default=str) + "\n",
-        encoding="utf-8",
-    )
-    torch.distributed.barrier()
-    return 0
+    from cosmos_framework.inference.common.init import init_script
+
+    init_script()
+    try:
+        report = run(args)
+        rank = int(report["rank"])
+        if rank == 0:
+            args.output.mkdir(parents=True)
+        torch.distributed.barrier()
+        output_path = args.output / f"rank_{rank}.json"
+        output_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True, default=str) + "\n",
+            encoding="utf-8",
+        )
+        torch.distributed.barrier()
+        return 0
+    finally:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
