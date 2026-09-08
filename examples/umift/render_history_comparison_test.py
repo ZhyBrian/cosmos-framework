@@ -10,7 +10,9 @@ from examples.umift.render_history_comparison import LABELS, METHODS, _encode, _
 def test_encode_preserves_six_panels_and_true_pts(tmp_path: Path) -> None:
     pytest.importorskip("av")
     assert len(BOXES) == len(LABELS) == 6
-    assert LABELS == ("GT", "Persistence", "Base Edge", "E2-H action", "E2-H zero", "E2-H shuffled")
+    assert LABELS == (
+        "真实视频", "首帧保持", "基础 Edge", "E2-H 真实动作", "E2-H 零动作", "E2-H 打乱动作",
+    )
     elapsed = np.array([0.0, 0.071, 0.139], dtype=np.float64)
     truth = np.empty((3, 256, 256, 3), dtype=np.uint8)
     truth[0], truth[1], truth[2] = 15, 75, 135
@@ -20,7 +22,9 @@ def test_encode_preserves_six_panels_and_true_pts(tmp_path: Path) -> None:
         for frame_index in range(3):
             value[frame_index] = (35 + method_index * 40 + frame_index * 7) / 255.0
         predictions[method] = value
-    episode = {"episode_id": 13, "start_percent": 0, "frame_count": 3}
+    episode = {"episode_id": 13, "start_percent": 0, "frame_count": 3,
+               "selected_iteration": 1500, "history_padding_count": 4,
+               "initial_episode_elapsed_seconds": 2.5}
     path = tmp_path / "history.mp4"
 
     _encode(path, truth, predictions, episode, elapsed, history_frames=17)

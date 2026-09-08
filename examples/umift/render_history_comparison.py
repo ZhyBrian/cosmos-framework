@@ -17,12 +17,15 @@ from examples.umift.render_comparison import BOXES, HEIGHT, PANEL_SIZE, WIDTH
 
 
 METHODS = ("B0", "E2-A", "E2-Z", "E2-S")
-LABELS = ("GT", "Persistence", "Base Edge", "E2-H action", "E2-H zero", "E2-H shuffled")
+LABELS = ("真实视频", "首帧保持", "基础 Edge", "E2-H 真实动作", "E2-H 零动作", "E2-H 打乱动作")
+FONT_PATH = Path("/data/cosmos_runs/e1_final_eval/video_assets_20260907/NotoSansCJK-Regular.ttc")
 
 
 def _font(size: int):
-    path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-    return ImageFont.truetype(str(path), size) if path.is_file() else ImageFont.load_default()
+    if FONT_PATH.is_file():
+        return ImageFont.truetype(str(FONT_PATH), size, index=2)
+    fallback = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    return ImageFont.truetype(str(fallback), size) if fallback.is_file() else ImageFont.load_default()
 
 
 def _panel(frame, floating: bool) -> Image.Image:
@@ -37,20 +40,32 @@ def compose_frame(truth, predictions, index: int, elapsed: float, episode: dict,
     panels.extend(_panel(predictions[method][index], True) for method in METHODS)
     image = Image.new("RGB", (WIDTH, HEIGHT), "#101827")
     draw = ImageDraw.Draw(image)
-    draw.text((16, 12), f"Cosmos3 Edge E2-H · H={history_frames}", font=_font(40), fill="white")
+    iteration = int(episode["selected_iteration"])
+    padding = int(episode["history_padding_count"])
+    real_history = history_frames - padding
+    episode_elapsed = float(episode.get("initial_episode_elapsed_seconds", 0.0)) + elapsed
+    draw.text((16, 8), f"Cosmos3 Edge E2-H · H={history_frames} · 选中训练步 {iteration}",
+              font=_font(35), fill="white")
     draw.text(
-        (16, 68),
-        f"episode {episode['episode_id']} · start {episode.get('start_percent', 0)}% · "
-        f"frame {index}/{episode['frame_count'] - 1} · true PTS {elapsed:.3f}s",
-        font=_font(24),
+        (16, 55),
+        f"episode {episode['episode_id']} · 起点 {episode.get('start_percent', 0)}% · "
+        f"帧 {index}/{episode['frame_count'] - 1} · 本段真实 elapsed {elapsed:.3f}s · "
+        f"原 episode elapsed {episode_elapsed:.3f}s",
+        font=_font(22),
         fill="#CBD5E1",
     )
+    draw.text((16, 92),
+              f"模型参数 15 Hz（视频时长按真实 PTS） · 起点历史：真实 {real_history}/{history_frames}，"
+              f"首帧填充 {padding}", font=_font(22), fill="#F5D28B")
     for label, panel, (x, y) in zip(LABELS, panels, BOXES, strict=True):
         draw.text((x, y - 42), label, font=_font(24), fill="white")
         image.paste(panel, (x, y))
     block = 0 if index == 0 else (index - 1) // 16
     remaining = max(0, history_frames - 16 * block)
-    source = "initial history" if block == 0 else f"rolling feedback; {remaining} initial frame(s) remain"
+    if block == 0:
+        source = f"初始历史条件（不足部分重复 episode 首帧填充 {padding} 帧）"
+    else:
+        source = f"生成帧自反馈滚动历史；仍保留初始观测 {remaining} 帧"
     draw.text((16, 1348), source, font=_font(22), fill="#F5D28B")
     return image
 
@@ -118,6 +133,11 @@ def _verify_video(path: Path, truth, predictions, episode, elapsed) -> dict:
                     expected_rgb = np.asarray(expected)
                     if np.issubdtype(expected_rgb.dtype, np.floating):
                         expected_rgb = np.rint(expected_rgb * 255).clip(0, 255)
+                    expected_rgb = np.asarray(
+                        Image.fromarray(expected_rgb.astype(np.uint8)).resize(
+                            (PANEL_SIZE, PANEL_SIZE), Image.Resampling.NEAREST
+                        )
+                    )
                     patch = rgb[y : y + PANEL_SIZE, x : x + PANEL_SIZE].astype(np.float32)
                     mae = float(np.abs(patch - expected_rgb.astype(np.float32)).mean())
                     max_panel_mae = max(max_panel_mae, mae)

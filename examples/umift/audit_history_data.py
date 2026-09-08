@@ -53,7 +53,7 @@ def _load_configs(zarr_path: Path) -> tuple[dict[int, Any], dict[str, Any]]:
         assert list(config.scheduler.cycle_lengths) == [3000]
         assert list(config.scheduler.warm_up_steps) == [100]
         assert int(config.dataloader_train.dataloader.batch_size) == 1
-        assert int(config.dataloader_train.batcher.max_batch_size) == 1
+        assert int(config.dataloader_train.max_samples_per_batch) == 1
         assert int(config.trainer.grad_accum_iter) == 4
         assert str(dataset_cfg.split) == "refit_train"
         assert int(dataset_cfg.history_frames) == history_frames
@@ -70,7 +70,7 @@ def _load_configs(zarr_path: Path) -> tuple[dict[int, Any], dict[str, Any]]:
             "split": str(dataset_cfg.split),
             "history_frames": int(dataset_cfg.history_frames),
             "encode_exact_durations": list(config.model.config.tokenizer.encode_exact_durations),
-            "max_samples_per_batch": int(config.dataloader_train.batcher.max_batch_size),
+            "max_samples_per_batch": int(config.dataloader_train.max_samples_per_batch),
             "normalize_loss_by_active": bool(
                 config.model.config.rectified_flow_training_config.normalize_loss_by_active
             ),
