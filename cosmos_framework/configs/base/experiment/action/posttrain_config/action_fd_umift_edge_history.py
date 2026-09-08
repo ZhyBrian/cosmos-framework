@@ -25,7 +25,7 @@ def _make_history_experiment(history_frames: int):
     experiment.checkpoint.save_iter = 500
     experiment.model.config.tokenizer.encode_exact_durations = [history_frames + 16]
 
-    # Keep the released E1 loss normalization until the pending E2-H choice is confirmed.
+    # Preserve the E1 recipe; checkpoint selection compares the same 16 future RGB frames.
     # With False, clean history remains in the vision-loss denominator and longer H is down-weighted.
     experiment.model.config.rectified_flow_training_config.normalize_loss_by_active = False
 
