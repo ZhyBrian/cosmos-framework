@@ -15,7 +15,7 @@ export DATASET_PATH="$E3_DATA" BASE_CHECKPOINT_PATH="$E3_BASE" OMP_NUM_THREADS=1
 export PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1
 git rev-parse HEAD > "$E3_PREFLIGHT/source_commit.txt"
 date -u +%FT%TZ > "$E3_PREFLIGHT/started_at_utc.txt"
-python -m pytest -c /dev/null --noconftest \
+python -m pytest -p no:cacheprovider -c /dev/null --noconftest \
     cosmos_framework/data/generator/action/datasets/umift_history_dataset_test.py \
     examples/umift/history_contract_test.py examples/umift/history_selection_test.py \
     examples/umift/history_rollout_test.py examples/umift/render_history_comparison_test.py \
