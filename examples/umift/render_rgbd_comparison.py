@@ -242,7 +242,7 @@ def encode_video(
     with av.open(str(path), mode="w", options={"movflags": "+faststart"}) as container:
         stream = container.add_stream("libx264", rate=FPS, options={"preset": "fast", "crf": "16", "bf": "0"})
         stream.width, stream.height = WIDTH, HEIGHT
-        stream.pix_fmt = "yuv420p"
+        stream.pix_fmt = "yuv444p"
         stream.time_base = stream.codec_context.time_base = clock
 
         def mux(packet: av.Packet) -> None:
@@ -305,7 +305,7 @@ def verify_video(
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
         observed = (stream.width, stream.height, stream.codec_context.name, stream.codec_context.format.name)
-        if observed != (WIDTH, HEIGHT, "h264", "yuv420p"):
+        if observed != (WIDTH, HEIGHT, "h264", "yuv444p"):
             raise ValueError(f"unexpected RGBD video properties: {observed}")
         for decoded_count, frame in enumerate(container.decode(video=0), start=1):
             frame_index = decoded_count - 1
@@ -343,7 +343,7 @@ def verify_video(
         "width": WIDTH,
         "height": HEIGHT,
         "codec": "h264",
-        "pixel_format": "yuv420p",
+        "pixel_format": "yuv444p",
         "verified_frame_indices": sorted(inspect),
         "verified_panel_count": len(PANEL_SPECS),
         "max_pts_error_seconds": max_pts_error,

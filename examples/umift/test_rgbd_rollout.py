@@ -403,9 +403,14 @@ def test_twelve_panel_mapping_keeps_prediction_depth_independent_of_gt_mask() ->
     assert b0_depth.getpixel((100, 100)) != renderer.ZERO_SENTINEL_RGB
 
 
-def test_vfr_renderer_preserves_twelve_panels_dimensions_and_true_pts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("textured_depth", [False, True])
+def test_vfr_renderer_preserves_twelve_panels_dimensions_and_true_pts(tmp_path: Path, textured_depth: bool) -> None:
     pytest.importorskip("av")
     truth_rgb, truth_depth, predictions = _video_inputs(3)
+    if textured_depth:
+        # Chroma subsampling must not smear alternating near/far depth colors.
+        checker = np.indices((256, 256)).sum(axis=0) % 2
+        predictions["E3-A"][1][1:] = np.where(checker, 0.07, 0.43)
     elapsed = np.array([0.0, 0.071, 0.139], np.float64)
     episode = {
         "episode_id": 13,
