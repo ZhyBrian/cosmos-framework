@@ -167,14 +167,14 @@ def load_protocol(path: Path, arm: str) -> tuple[dict, str]:
 
 
 def choose_candidate(
-    reports: list[dict], protocol_sha: str, rgb_weight: float, arm: str
+    reports: list[dict], protocol_sha: str, rgb_weight: float, arm: str, *, iterations=ITERATIONS
 ) -> dict:
     identity = _identity(arm)
     return core.choose_candidate(
         reports,
         protocol_sha,
         rgb_weight,
-        iterations=ITERATIONS,
+        iterations=iterations,
         candidate_validator=lambda checkpoint, iteration: validate_candidate_identity(
             checkpoint, iteration, arm
         ),
@@ -212,9 +212,18 @@ def score(args) -> None:
 
 def select(args) -> None:
     protocol, protocol_sha = load_protocol(args.protocol, args.arm)
-    paths = [args.input / f"iter_{step:09d}" / "metrics.json" for step in ITERATIONS]
+    iterations = (
+        tuple(int(item) for item in args.iterations.split(","))
+        if args.iterations
+        else ITERATIONS
+    )
+    if sorted(set(iterations)) != list(iterations):
+        raise ValueError("iterations must be distinct and sorted")
+    paths = [args.input / f"iter_{step:09d}" / "metrics.json" for step in iterations]
     reports = [json.loads(path.read_text()) for path in paths]
-    best = choose_candidate(reports, protocol_sha, protocol["rgb_weight"], args.arm)
+    best = choose_candidate(
+        reports, protocol_sha, protocol["rgb_weight"], args.arm, iterations=iterations
+    )
     result = dict(
         **_identity(args.arm),
         history_frames=5,
@@ -236,7 +245,7 @@ def select(args) -> None:
             for report, path in zip(reports, paths, strict=True)
         ],
     )
-    output = args.input / "selected.json"
+    output = args.input / args.output_name
     if output.exists():
         raise FileExistsError(output)
     output.write_text(json.dumps(result, indent=2) + "\n")
@@ -261,6 +270,13 @@ def main() -> None:
         command_parser.add_argument("--protocol", type=Path, required=True)
         command_parser.add_argument("--input", type=Path, required=True)
         command_parser.add_argument("--arm", choices=ARMS, required=True)
+        if command == "select":
+            command_parser.add_argument(
+                "--iterations",
+                default=None,
+                help="comma-separated candidate steps; default is the frozen stage-2 list",
+            )
+            command_parser.add_argument("--output-name", default="selected.json")
     args = parser.parse_args()
     if args.command == "freeze":
         freeze(args.zarr, args.output, args.rgb_weight, args.arm)

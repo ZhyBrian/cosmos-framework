@@ -38,6 +38,25 @@ def test_depth_selection_keeps_arm_identity_and_uses_early_tie() -> None:
     assert choose_candidate(_reports(), "frozen", 0.5, "d1")["iteration"] == 750
 
 
+def test_depth_selection_accepts_registered_extension_candidates() -> None:
+    from examples.umift.depth_selection import choose_candidate
+
+    reports = _reports()
+    template = copy.deepcopy(reports[-1])
+    extra = []
+    for step, value in ((1250, 0.09), (1500, 0.08)):
+        report = copy.deepcopy(template)
+        report["iteration"] = step
+        report["checkpoint"] = report["checkpoint"].replace("iter_000001000", f"iter_{step:09d}")
+        report["session_equal_aggregate"]["overall"]["lpips"] = value
+        extra.append(report)
+    six = tuple(step for step, _ in zip((250, 500, 750, 1000, 1250, 1500), range(6)))
+    chosen = choose_candidate(reports + extra, "frozen", 0.5, "d1", iterations=six)
+    assert chosen["iteration"] == 1500
+    with pytest.raises(ValueError):
+        choose_candidate(reports, "frozen", 0.5, "d1", iterations=six)
+
+
 @pytest.mark.parametrize("change", ["wrong_arm", "wrong_path", "wrong_protocol"])
 def test_depth_selection_rejects_cross_arm_or_protocol_candidate(change: str) -> None:
     from examples.umift.depth_selection import choose_candidate
