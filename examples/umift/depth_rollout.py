@@ -59,13 +59,17 @@ def bind_manifest(parent, selection, *, arm: str, **kwargs):
 def _validate_selection(path: Path, arm: str):
     selection_sha = rollout_core.file_sha(path)
     selection = json.loads(path.read_text())
+    allowed_iterations = (
+        depth_selection.ITERATIONS,
+        depth_selection.ITERATIONS + depth_selection.EXTENSION_ITERATIONS,
+    )
     if (
         selection.get("experiment_id") != EXPERIMENT_ID
         or selection.get("arm") != arm
         or selection.get("history_frames") != 5
         or selection.get("selection_uses_test_episodes") is not True
         or not isinstance(selection.get("candidates"), list)
-        or len(selection["candidates"]) != 4
+        or tuple(c.get("iteration") for c in selection["candidates"]) not in allowed_iterations
     ):
         raise ValueError(f"selection is not the frozen {arm} depth result")
     protocol_path = Path(selection["protocol_file"])
@@ -90,7 +94,11 @@ def _validate_selection(path: Path, arm: str):
             raise ValueError("candidate summary differs from its metrics report")
         reports.append(report)
     best = depth_selection.choose_candidate(
-        reports, selection["protocol_sha256"], float(selection["rgb_weight"]), arm
+        reports,
+        selection["protocol_sha256"],
+        float(selection["rgb_weight"]),
+        arm,
+        iterations=tuple(c["iteration"] for c in selection["candidates"]),
     )
     if (
         int(selection["iteration"]) != int(best["iteration"])
