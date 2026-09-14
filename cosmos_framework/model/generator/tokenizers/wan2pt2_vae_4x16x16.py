@@ -999,6 +999,28 @@ class WanVAE_(nn.Module):
         decoded = unpatchify(torch.cat(parts, dim=2), patch_size=2)  # [B,3,T,H,W]
         return decoded  # [B,3,T,H,W]
 
+    def decode_with_grad(self, z, scale):
+        """Decode with input gradients using a fresh eager decoder cache."""
+        self._dec_cache = self._new_dec_cache()
+        try:
+            z = self._denormalize_latent(z, scale)
+            x = self.conv2(z)
+
+            parts = []
+            for i in range(x.shape[2]):
+                first_chunk = i == 0
+                parts.append(
+                    self.decoder.forward(
+                        x[:, :, i : i + 1],
+                        feat_cache=self._dec_cache,
+                        first_chunk=first_chunk,
+                    )
+                )
+
+            return unpatchify(torch.cat(parts, dim=2), patch_size=2)
+        finally:
+            self._dec_cache = self._new_dec_cache()
+
     def clear_decoder_cache(self) -> None:
         self._dec_cache = self._new_dec_cache()
 
@@ -1254,6 +1276,13 @@ class WanVAE:
         video_recon = self.model.decode(zs, self.scale, clear_decoder_cache)
         video_recon = video_recon.to(in_dtype)
         return video_recon
+
+    def decode_with_grad(self, zs: torch.Tensor) -> torch.Tensor:
+        """Decode with gradients to the latent while keeping VAE parameters frozen."""
+        in_dtype = zs.dtype
+        zs = zs.to(self.dtype)
+        video_recon = self.model.decode_with_grad(zs, self.scale)
+        return video_recon.to(in_dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -1532,6 +1561,14 @@ class Wan2pt2VAEInterface(VideoTokenizerInterface):
                 clear_decoder_cache=not self._keep_decoder_cache,
             )  # [B,3,T,H,W]
         return self.model.decode(latent, clear_decoder_cache=not self._keep_decoder_cache)  # [B,3,T,H,W]
+
+    def decode_with_grad(self, latent: torch.Tensor) -> torch.Tensor:
+        """Decode through the native eager Wan decoder with a fresh cache."""
+        if getattr(self, "_decoder_override", None) is not None:
+            raise RuntimeError("Differentiable decode does not support a decoder override.")
+        if self._keep_decoder_cache:
+            raise RuntimeError("Differentiable decode cannot run in a cached decoder scope.")
+        return self.model.decode_with_grad(latent)
 
     @torch.no_grad()
     def compile_encode(
