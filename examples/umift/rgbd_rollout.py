@@ -36,6 +36,25 @@ _SOURCE_EPISODE_DEFAULTS = {
     "parent_frame_count": lambda episode: episode["frame_count"],
     "initial_episode_elapsed_seconds": lambda episode: 0.0,
 }
+# Per-arm rollout adapters (depth_rollout.prepare) annotate each frozen chunk
+# with independently recomputed model-action hashes. Those annotations are
+# re-validated against the live batch at inference time, so manifest-level
+# validation only requires every source key to be preserved unchanged.
+_PREPARED_CHUNK_EXTRA_FIELDS = frozenset(f"{key}_model_action_sha256" for key in ("A", "Z", "S"))
+
+
+def _validate_prepared_chunks(source_chunks: Any, prepared_chunks: Any, episode_id: Any) -> None:
+    if (
+        not isinstance(source_chunks, list)
+        or not isinstance(prepared_chunks, list)
+        or len(prepared_chunks) != len(source_chunks)
+    ):
+        raise ValueError(f"prepared episode {episode_id} chunks differs from source manifest")
+    for source_chunk, prepared_chunk in zip(source_chunks, prepared_chunks, strict=True):
+        if any(prepared_chunk.get(key) != value for key, value in source_chunk.items()):
+            raise ValueError(f"prepared episode {episode_id} chunks differs from source manifest")
+        if not set(prepared_chunk) <= set(source_chunk) | _PREPARED_CHUNK_EXTRA_FIELDS:
+            raise ValueError(f"prepared episode {episode_id} chunks differs from source manifest")
 
 
 def array_sha(array: np.ndarray) -> str:
@@ -271,7 +290,13 @@ def _validate_manifest(
         if arm is not None and prepared_episode.get("arm") != arm:
             raise ValueError("prepared episode differs from the requested arm")
         for field in _SOURCE_EPISODE_FIELDS:
-            if prepared_episode.get(field) != source_episode.get(field):
+            if field == "chunks":
+                _validate_prepared_chunks(
+                    source_episode.get("chunks"),
+                    prepared_episode.get("chunks"),
+                    prepared_episode.get("episode_id"),
+                )
+            elif prepared_episode.get(field) != source_episode.get(field):
                 raise ValueError(
                     f"prepared episode {prepared_episode.get('episode_id')} {field} differs from source manifest"
                 )

@@ -227,6 +227,23 @@ def test_manifest_rejects_execution_fields_changed_after_source_binding(tmp_path
         with pytest.raises(ValueError, match="source manifest"):
             rgbd_rollout._validate_manifest(changed, manifest_path)
 
+    annotated = copy.deepcopy(manifest)
+    for episode in annotated["episodes"]:
+        for chunk in episode["chunks"]:
+            for action_key in ("A", "Z", "S"):
+                chunk[f"{action_key}_model_action_sha256"] = "0" * 64
+    rgbd_rollout._validate_manifest(annotated, manifest_path)
+
+    unexpected_extra = copy.deepcopy(annotated)
+    unexpected_extra["episodes"][0]["chunks"][0]["unexpected_field"] = "x"
+    with pytest.raises(ValueError, match="source manifest"):
+        rgbd_rollout._validate_manifest(unexpected_extra, manifest_path)
+
+    tampered_annotation = copy.deepcopy(annotated)
+    tampered_annotation["episodes"][0]["chunks"][0]["noise_seed"] += 1
+    with pytest.raises(ValueError, match="source manifest"):
+        rgbd_rollout._validate_manifest(tampered_annotation, manifest_path)
+
     source_start0 = copy.deepcopy(source)
     for episode in source_start0["episodes"]:
         for field in (
