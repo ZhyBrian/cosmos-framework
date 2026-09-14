@@ -605,6 +605,12 @@ def _validate_metadata(
         expected_action_hash = expected_chunk[f"{action_key}_physical_action_sha256"]
         if actual.get("physical_action_sha256") != expected_action_hash:
             raise ValueError(f"{method}: physical action hash differs from the frozen fixture")
+        if arm is not None:
+            from examples.umift.depth_rollout import validate_depth_action_identity
+
+            validate_depth_action_identity(method, expected_chunk, {
+                **actual, "action_source": record.get("action_source")
+            })
         expected_history_source = (
             "initial_observed_h5_rgbd" if block_index == 0 else "generated_rolling_rgbd"
         )

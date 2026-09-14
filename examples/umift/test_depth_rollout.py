@@ -1,7 +1,10 @@
 import copy
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+import sys
 
 import numpy as np
+import pytest
 
 
 def test_depth_manifest_binding_preserves_parent_and_adds_arm_identity() -> None:
@@ -72,3 +75,78 @@ def test_original_e3_keyword_defaults_remain_unchanged() -> None:
         for modality in ("rgb", "depth_m")
         for method in ("GT", "P", "B0", "E3-A", "E3-Z", "E3-S")
     )
+
+
+def test_depth_model_action_hash_is_derived_from_physical_action_and_rejects_tamper() -> None:
+    from examples.umift.depth_rollout import (
+        expected_model_action_sha256,
+        validate_depth_action_identity,
+    )
+
+    physical = np.arange(160, dtype=np.float32).reshape(16, 10) / 100
+    expected = expected_model_action_sha256(physical, max_action_dim=64)
+    frozen = {
+        "A_physical_action_sha256": "a" * 64,
+        "A_model_action_sha256": expected,
+    }
+    actual = {
+        "action_source": "A",
+        "physical_action_sha256": "a" * 64,
+        "padded_model_action_sha256": expected,
+    }
+    validate_depth_action_identity("D1-A", frozen, actual)
+
+    tampered = dict(actual, padded_model_action_sha256="b" * 64)
+    with pytest.raises(ValueError, match="model action"):
+        validate_depth_action_identity("D1-A", frozen, tampered)
+
+
+def test_rgbd_loader_accepts_explicit_job_and_records_experiment(monkeypatch) -> None:
+    from examples.umift.rgbd_infer import load_rgbd_model
+
+    config = SimpleNamespace(
+        job=SimpleNamespace(name="action_fd_umift_edge_rgbd_d1"),
+        dataloader_train=SimpleNamespace(
+            _target_=SimpleNamespace(__name__="get_umift_rgbd_packing_dataloader"),
+            dataloader=SimpleNamespace(
+                datasets=SimpleNamespace(
+                    umift=SimpleNamespace(
+                        dataset=SimpleNamespace(
+                            _target_=SimpleNamespace(
+                                __name__="get_umift_rgbd_sft_dataset"
+                            )
+                        )
+                    )
+                )
+            ),
+        ),
+    )
+    config_module = ModuleType("cosmos_framework.configs.toml_config.sft_config")
+    config_module.load_experiment_from_toml = lambda path: config
+    history_module = ModuleType("examples.umift.history_infer")
+    history_module.load_history_model = lambda *args, **kwargs: (
+        "model",
+        config,
+        {"model_key_count": 549, "checkpoint_key_count": 549},
+    )
+    monkeypatch.setitem(
+        sys.modules, "cosmos_framework.configs.toml_config.sft_config", config_module
+    )
+    monkeypatch.setitem(sys.modules, "examples.umift.history_infer", history_module)
+
+    _, _, evidence = load_rgbd_model(
+        Path("d1.toml"),
+        Path("checkpoint"),
+        expected_job_name="action_fd_umift_edge_rgbd_d1",
+        experiment_id="E3-Depth-Aux",
+    )
+    assert evidence["experiment"] == "E3-Depth-Aux"
+    assert evidence["job_name"] == "action_fd_umift_edge_rgbd_d1"
+
+    with pytest.raises(ValueError, match="action_fd_umift_edge_rgbd_b_continue"):
+        load_rgbd_model(
+            Path("d1.toml"),
+            Path("checkpoint"),
+            expected_job_name="action_fd_umift_edge_rgbd_b_continue",
+            experiment_id="E3-Depth-Aux",
+        )

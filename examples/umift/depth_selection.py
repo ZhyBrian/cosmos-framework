@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -18,6 +19,37 @@ ARMS = ("b_continue", "d1")
 PROTOCOL = "e3-depth-aux-selection-v1"
 EXPERIMENT_ID = "E3-Depth-Aux"
 expected_windows = core.expected_windows
+
+
+def action_source_indices(start: int) -> np.ndarray:
+    """Return the 17 source poses used by the dataset's forward window."""
+    return int(start) + 2 * np.arange(17, dtype=np.int64)
+
+
+def expected_model_action_sha256(physical_action: np.ndarray, max_action_dim: int = 64) -> str:
+    """Derive the model-space action digest from the canonical physical action."""
+    physical = np.asarray(physical_action, dtype=np.float32)
+    if physical.shape != (16, 10):
+        raise ValueError("physical action must have shape [16,10]")
+    stats_path = (Path(__file__).parents[2] / "cosmos_framework/data/generator/action/normalizer_stats/umi_lerobot_stats.json")
+    stats = json.loads(stats_path.read_text())
+    q01 = np.asarray(stats["q01"][:10], dtype=np.float32)
+    q99 = np.asarray(stats["q99"][:10], dtype=np.float32)
+    scale = np.maximum((q99 - q01) / np.float32(2), np.float32(1e-8))
+    normalized = (physical - (q99 + q01) / np.float32(2)) / scale
+    if max_action_dim < 10:
+        raise ValueError("max_action_dim cannot be smaller than 10")
+    model = np.pad(normalized, ((0, 0), (0, max_action_dim - 10))).astype(np.float32)
+    return hashlib.sha256(np.ascontiguousarray(model).tobytes()).hexdigest()
+
+
+def validate_window_action_identity(window: dict, sample: dict) -> None:
+    from examples.umift.rgbd_rollout import array_sha
+
+    if array_sha(sample["physical_action"].cpu().numpy()) != window.get("physical_action_sha256"):
+        raise ValueError("selection physical action differs from frozen source action")
+    if array_sha(sample["action"].cpu().numpy()) != window.get("model_action_sha256"):
+        raise ValueError("selection model action differs from independently frozen padding")
 
 
 def _identity(arm: str) -> dict[str, str]:
@@ -60,6 +92,12 @@ def freeze(zarr_path: Path, output: Path, rgb_weight: float, arm: str) -> None:
             raise ValueError("insufficient legal windows")
         for start in starts:
             window_id = f"episode_{episode_id}:s={start}"
+            from cosmos_framework.data.generator.action.datasets.umift_zarr_dataset import _framewise_actions
+
+            indices = action_source_indices(int(start))
+            physical_action = _framewise_actions(
+                np.asarray(group["ts_pose_fb_0"].oindex[indices], dtype=np.float64)
+            )
             windows.append(
                 dict(
                     episode_id=episode_id,
@@ -67,9 +105,13 @@ def freeze(zarr_path: Path, output: Path, rgb_weight: float, arm: str) -> None:
                     raw_session=str(group.attrs["src"]).split("#")[0],
                     window_id=window_id,
                     noise_seed=derive_noise_seed(window_id, 0),
+                    physical_action_sha256=hashlib.sha256(
+                        np.ascontiguousarray(physical_action).tobytes()
+                    ).hexdigest(),
+                    model_action_sha256=expected_model_action_sha256(physical_action),
                 )
             )
-    if windows != expected_windows():
+    if [{k: v for k, v in window.items() if not k.endswith("action_sha256")} for window in windows] != expected_windows():
         raise ValueError("source differs from the audited fixed 24 windows")
     report = dict(
         protocol=PROTOCOL,
@@ -101,7 +143,13 @@ def load_protocol(path: Path, arm: str) -> tuple[dict, str]:
         or protocol.get("history_frames") != 5
         or protocol.get("selection_uses_test_episodes") is not True
         or protocol.get("iterations") != list(ITERATIONS)
-        or protocol.get("windows") != expected_windows()
+        or [{k: v for k, v in window.items() if not k.endswith("action_sha256")}
+            for window in protocol.get("windows", [])] != expected_windows()
+        or any(
+            not isinstance(window.get(field), str) or len(window[field]) != 64
+            for window in protocol.get("windows", [])
+            for field in ("physical_action_sha256", "model_action_sha256")
+        )
         or protocol.get("prediction_clamp_for_depth_metrics") is not False
         or protocol.get("num_steps") != 30
         or protocol.get("depth_units") != "metres"
@@ -144,6 +192,9 @@ def infer(args) -> None:
             checkpoint, iteration, args.arm
         ),
         identity=identity,
+        window_action_validator=validate_window_action_identity,
+        expected_job_name=f"action_fd_umift_edge_rgbd_{args.arm}",
+        allowed_visible_devices=("0,1,2,3", "4,5,6,7"),
     )
 
 

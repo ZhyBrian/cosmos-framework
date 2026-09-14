@@ -350,6 +350,8 @@ def infer(
     protocol: str = "e3-dout-rgbd-open-loop-v1",
     arm: str | None = None,
     model_methods: tuple[str, ...] = MODEL_METHODS,
+    expected_job_name: str = "action_fd_umift_edge_rgbd_h5",
+    allowed_visible_devices: tuple[str, ...] = ("0,1,2,3",),
 ) -> None:
     import torch
 
@@ -364,7 +366,9 @@ def infer(
     )
     from examples.umift.rgbd_infer import build_rgbd_batch, load_rgbd_model, run_rgbd_prediction
 
-    validate_launch_environment(dict(os.environ))
+    validate_launch_environment(
+        dict(os.environ), allowed_visible_devices=allowed_visible_devices
+    )
     init_script()
     manifest_path = (args.root / "prepared" / "manifest.json").resolve()
     manifest_sha = file_sha(manifest_path)
@@ -380,7 +384,12 @@ def infer(
     output_root = args.root / ("rgbd_smoke" if args.max_chunks else "rgbd_inference")
     run_path = _run_evidence_path(output_root, args.phase, rank)
     checkpoint = Path(manifest["base_checkpoint"] if args.phase == "base" else manifest["selected_checkpoint"])
-    model, resolved, load_evidence = load_rgbd_model(args.sft_toml, checkpoint)
+    model, resolved, load_evidence = load_rgbd_model(
+        args.sft_toml,
+        checkpoint,
+        expected_job_name=expected_job_name,
+        experiment_id=experiment_id,
+    )
     validate_independent_parallelism(model.parallel_dims)
     dataset = get_umift_rgbd_sft_dataset(
         manifest["zarr_path"],
@@ -454,6 +463,18 @@ def infer(
                     if not np.array_equal(observed, history):
                         raise ValueError("float rolling RGBD history changed while building the batch")
                     model_action_hashes[chunk_index] = array_sha(sample["action"].cpu().numpy())
+                    if arm is not None:
+                        from examples.umift.depth_rollout import validate_depth_action_identity
+
+                        validate_depth_action_identity(
+                            method,
+                            chunk,
+                            {
+                                "action_source": action_key,
+                                "physical_action_sha256": expected_hash,
+                                "padded_model_action_sha256": model_action_hashes[chunk_index],
+                            },
+                        )
                     return run_rgbd_prediction(
                         model,
                         _move_batch_to_cuda(batch),

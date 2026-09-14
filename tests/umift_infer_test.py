@@ -206,6 +206,20 @@ def test_model_launch_requires_only_gpu_zero_through_three_visible() -> None:
         validate_launch_environment({"CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7", "WORLD_SIZE": "4"})
 
 
+def test_model_launch_can_explicitly_allow_either_four_gpu_group() -> None:
+    allowed = ("0,1,2,3", "4,5,6,7")
+    for visible in allowed:
+        validate_launch_environment(
+            {"CUDA_VISIBLE_DEVICES": visible, "WORLD_SIZE": "4"},
+            allowed_visible_devices=allowed,
+        )
+    with pytest.raises(ValueError, match="4,5,6,7"):
+        validate_launch_environment(
+            {"CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7", "WORLD_SIZE": "4"},
+            allowed_visible_devices=allowed,
+        )
+
+
 def test_overfit_split_maps_only_to_training_episode_and_overfit_stage() -> None:
     assert resolve_dataset_protocol("overfit", "e1") == ("train", "overfit")
     assert resolve_dataset_protocol("dev", "smoke") == ("dev", "smoke")

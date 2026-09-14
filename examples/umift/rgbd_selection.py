@@ -86,17 +86,26 @@ def infer(
     iterations=ITERATIONS,
     candidate_validator=validate_candidate_identity,
     identity=None,
+    window_action_validator=None,
+    expected_job_name="action_fd_umift_edge_rgbd_h5",
+    allowed_visible_devices=("0,1,2,3",),
 ):
     import torch
     from cosmos_framework.data.generator.action.datasets.umift_rgbd_dataset import get_umift_rgbd_sft_dataset
     from cosmos_framework.inference.common.init import init_script
     from examples.umift.rgbd_infer import build_rgbd_batch,load_rgbd_model,run_rgbd_prediction,split_prediction
     from examples.umift.infer import _move_batch_to_cuda,validate_independent_parallelism,validate_launch_environment
-    validate_launch_environment(os.environ);init_script()
+    validate_launch_environment(
+        os.environ, allowed_visible_devices=allowed_visible_devices
+    );init_script()
     p,sha=protocol_loader(args.protocol)
     if args.iteration not in iterations:raise ValueError('candidate not preregistered')
     candidate_validator(args.checkpoint,args.iteration)
-    model,resolved,evidence=load_rgbd_model(args.sft_toml,args.checkpoint)
+    experiment_id=(identity or {}).get('experiment_id','E3-Dout')
+    model,resolved,evidence=load_rgbd_model(
+        args.sft_toml,args.checkpoint,
+        expected_job_name=expected_job_name,experiment_id=experiment_id,
+    )
     identity={'experiment_id':'E3-Dout'} if identity is None else dict(identity)
     validate_independent_parallelism(model.parallel_dims)
     ds=get_umift_rgbd_sft_dataset(p['zarr_path'],split='history',history_frames=5,
@@ -109,6 +118,7 @@ def infer(
         for i,w in enumerate(p['windows']):
             if i%4!=rank:continue
             s=ds.get_window(w['episode_id'],w['start'])
+            if window_action_validator is not None:window_action_validator(w,s)
             truth=((s['video'][:,:,:,:256].permute(1,2,3,0).numpy()[4:]+1)/2).astype(np.float32)
             depth_truth=s['depth_m'].numpy()[4:].astype(np.float32)
             full=run_rgbd_prediction(model,_move_batch_to_cuda(build_rgbd_batch(s)),
@@ -120,6 +130,7 @@ def infer(
             np.savez(dest,truth=truth,prediction=prediction,depth_truth=depth_truth,depth_prediction=depth_prediction)
             rows.append({**w,'window_index':i,'file':dest.name,'sha256':file_sha(dest),
                          'physical_action_sha256':array_sha(s['physical_action'].numpy()),
+                         'model_action_sha256':array_sha(s['action'].numpy()),
                          'history_source_indices':s['history_source_indices'].tolist(),
                          'history_padding_count':s['history_padding_count']})
             print(json.dumps(dict(window_done=i,iteration=args.iteration)),flush=True)
@@ -161,6 +172,10 @@ def score(
     metric=_lpips_metric();results=[];model_flat=[];p_flat=[]
     for row,w in zip(rows,p['windows'],strict=True):
         if any(row[k]!=v for k,v in w.items()):raise ValueError('window identity changed')
+        if expected_identity is not None and any(
+                row.get(key) != w.get(key)
+                for key in ('physical_action_sha256','model_action_sha256')):
+            raise ValueError('selection action identity changed')
         src=args.input/row['file']
         if file_sha(src)!=row['sha256']:raise ValueError('prediction file changed')
         with np.load(src,allow_pickle=False) as d:

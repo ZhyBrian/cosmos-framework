@@ -18,6 +18,17 @@ ARMS = ("b_continue", "d1")
 EXPERIMENT_ID = "E3-Depth-Aux"
 ROLLOUT_PROTOCOL = "e3-depth-aux-rgbd-open-loop-v1"
 SCORING_PROTOCOL = "e3-depth-aux-rgbd-full-suffix-scoring-v1"
+expected_model_action_sha256 = depth_selection.expected_model_action_sha256
+
+
+def validate_depth_action_identity(method: str, frozen: dict, actual: dict) -> None:
+    action_key = "A" if method == "B0" else method[-1]
+    if actual.get("action_source", action_key) != action_key:
+        raise ValueError("depth rollout action source differs from method")
+    if actual.get("physical_action_sha256") != frozen.get(f"{action_key}_physical_action_sha256"):
+        raise ValueError("depth rollout physical action differs from frozen fixture")
+    if actual.get("padded_model_action_sha256") != frozen.get(f"{action_key}_model_action_sha256"):
+        raise ValueError("depth rollout model action differs from independently frozen padding")
 
 
 def _arm_label(arm: str) -> str:
@@ -96,13 +107,23 @@ def _validate_selection(path: Path, arm: str):
 
 
 def prepare(args: argparse.Namespace) -> Path:
-    return prepare_core.prepare(
+    path = prepare_core.prepare(
         args,
         selection_validator=lambda path: _validate_selection(path, args.arm),
         experiment_id=EXPERIMENT_ID,
         protocol=ROLLOUT_PROTOCOL,
         arm=args.arm,
     )
+    manifest = json.loads(path.read_text())
+    for episode in manifest["episodes"]:
+        with np.load(episode["actions_path"], allow_pickle=False) as archive:
+            actions = {key: np.asarray(archive[key], dtype=np.float32) for key in ("A", "Z", "S")}
+        for chunk in episode["chunks"]:
+            index = int(chunk["index"])
+            for key, values in actions.items():
+                chunk[f"{key}_model_action_sha256"] = expected_model_action_sha256(values[index])
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return path
 
 
 def infer(args: argparse.Namespace) -> None:
@@ -112,6 +133,8 @@ def infer(args: argparse.Namespace) -> None:
         protocol=ROLLOUT_PROTOCOL,
         arm=args.arm,
         model_methods=model_methods(args.arm),
+        expected_job_name=f"action_fd_umift_edge_rgbd_{args.arm}",
+        allowed_visible_devices=("0,1,2,3", "4,5,6,7"),
     )
 
 

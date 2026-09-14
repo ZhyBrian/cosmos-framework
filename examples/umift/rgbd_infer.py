@@ -91,13 +91,21 @@ def split_prediction(canvas: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return rgb, depth
 
 
-def load_rgbd_model(sft_toml: Path, checkpoint: Path):
+def load_rgbd_model(
+    sft_toml: Path,
+    checkpoint: Path,
+    *,
+    expected_job_name: str = "action_fd_umift_edge_rgbd_h5",
+    experiment_id: str = "E3-Dout",
+):
     from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
     from examples.umift.history_infer import load_history_model
 
     config = load_experiment_from_toml(sft_toml)
-    if config.job.name != "action_fd_umift_edge_rgbd_h5":
-        raise ValueError("E3-Dout requires its isolated RGBD experiment configuration")
+    if config.job.name != expected_job_name:
+        raise ValueError(
+            f"{experiment_id} requires RGBD experiment configuration {expected_job_name}"
+        )
     expected_targets = (
         (config.dataloader_train._target_, "get_umift_rgbd_packing_dataloader"),
         (config.dataloader_train.dataloader.datasets.umift.dataset._target_, "get_umift_rgbd_sft_dataset"),
@@ -109,6 +117,7 @@ def load_rgbd_model(sft_toml: Path, checkpoint: Path):
     model, resolved, evidence = load_history_model(sft_toml, checkpoint, 5, independent_windows=True)
     if evidence["model_key_count"] != 549 or evidence["checkpoint_key_count"] != 549:
         raise ValueError("E3 must preserve exactly the 549 Edge model/checkpoint keys")
-    evidence.update(experiment="E3-Dout", canvas_shape=[3, 21, 256, 512],
+    evidence.update(experiment=experiment_id, job_name=expected_job_name,
+                    canvas_shape=[3, 21, 256, 512],
                     depth_units="metres", depth_representation="linear_gray3_range_0_to_0.5")
     return model, resolved, evidence

@@ -393,11 +393,20 @@ def validate_sampling_protocol(split: str, method: str, sampling_seeds: list[int
         raise ValueError("dev checkpoint selection requires sampling seed [0]")
 
 
-def validate_launch_environment(environment: dict[str, str]) -> None:
+def validate_launch_environment(
+    environment: dict[str, str],
+    *,
+    allowed_visible_devices: tuple[str, ...] = ("0,1,2,3",),
+) -> None:
     visible = environment.get("CUDA_VISIBLE_DEVICES")
-    if visible != "0,1,2,3":
+    if visible not in allowed_visible_devices:
+        if allowed_visible_devices == ("0,1,2,3",):
+            raise ValueError(
+                "model inference requires CUDA_VISIBLE_DEVICES=0,1,2,3 so GPUs 4-7 are never visible"
+            )
         raise ValueError(
-            "model inference requires CUDA_VISIBLE_DEVICES=0,1,2,3 so GPUs 4-7 are never visible"
+            "model inference requires CUDA_VISIBLE_DEVICES in "
+            f"{allowed_visible_devices}, got {visible!r}"
         )
     if environment.get("WORLD_SIZE") != "4":
         raise ValueError("model inference requires torchrun WORLD_SIZE=4")

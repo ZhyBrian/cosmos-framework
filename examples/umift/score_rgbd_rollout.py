@@ -423,6 +423,12 @@ def _load_prediction(
                 raise ValueError(
                     f"{method} rollout chunk identity differs from the prepared manifest"
                 )
+        if arm is not None:
+            from examples.umift.depth_rollout import validate_depth_action_identity
+
+            validate_depth_action_identity(method, chunk, {
+                **record, "action_source": metadata.get("action_source")
+            })
         start = int(chunk["output_start"]) + 1
         stop = start + int(chunk["steps"])
         from examples.umift.rgbd_rollout import array_sha

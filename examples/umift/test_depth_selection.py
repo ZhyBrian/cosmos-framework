@@ -1,7 +1,14 @@
 import copy
 import json
 
+import numpy as np
 import pytest
+
+
+def test_depth_freeze_uses_same_seventeen_pose_indices_as_dataset_window() -> None:
+    from examples.umift.depth_selection import action_source_indices
+
+    np.testing.assert_array_equal(action_source_indices(7), 7 + 2 * np.arange(17))
 
 
 def _reports(arm: str = "d1") -> list[dict]:
@@ -67,7 +74,9 @@ def test_depth_protocol_rejects_wrong_arm_and_old_e3_protocol(tmp_path) -> None:
         num_steps=30,
         selection_uses_test_episodes=True,
         zarr_path="/data/dataset.zarr",
-        windows=expected_windows(),
+        windows=[dict(window, physical_action_sha256=f"{index:064x}",
+                      model_action_sha256=f"{index + 1:064x}")
+                 for index, window in enumerate(expected_windows())],
     )
     path = tmp_path / "protocol.json"
     path.write_text(json.dumps(protocol))
@@ -83,3 +92,21 @@ def test_depth_protocol_rejects_wrong_arm_and_old_e3_protocol(tmp_path) -> None:
     path.write_text(json.dumps(protocol))
     with pytest.raises(ValueError):
         load_protocol(path, "d1")
+
+
+def test_depth_selection_rejects_model_action_that_differs_from_frozen_hash() -> None:
+    from examples.umift.depth_selection import expected_model_action_sha256, validate_window_action_identity
+    from examples.umift.rgbd_rollout import array_sha
+
+    class TensorLike:
+        def __init__(self, value): self.value = value
+        def cpu(self): return self
+        def numpy(self): return self.value
+    physical = np.arange(160, dtype=np.float32).reshape(16, 10) / 100
+    padded = np.zeros((16, 64), dtype=np.float32)
+    window = dict(physical_action_sha256=array_sha(physical),
+                  model_action_sha256=expected_model_action_sha256(physical))
+    with pytest.raises(ValueError, match="model action"):
+        validate_window_action_identity(
+            window, {"physical_action": TensorLike(physical), "action": TensorLike(padded)}
+        )
