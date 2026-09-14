@@ -15,6 +15,8 @@ from examples.umift.rgbd_metrics import joint_selection_score
 
 
 ITERATIONS = (250, 500, 750, 1000)
+# Registered 2026-09-14 extension: both arms add matched candidates at +1250/+1500.
+EXTENSION_ITERATIONS = (1250, 1500)
 ARMS = ("b_continue", "d1")
 PROTOCOL = "e3-depth-aux-selection-v1"
 EXPERIMENT_ID = "E3-Depth-Aux"
@@ -187,7 +189,7 @@ def infer(args) -> None:
     core.infer(
         args,
         protocol_loader=lambda path: load_protocol(path, args.arm),
-        iterations=ITERATIONS,
+        iterations=ITERATIONS + EXTENSION_ITERATIONS,
         candidate_validator=lambda checkpoint, iteration: validate_candidate_identity(
             checkpoint, iteration, args.arm
         ),

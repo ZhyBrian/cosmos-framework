@@ -38,6 +38,13 @@ def test_depth_selection_keeps_arm_identity_and_uses_early_tie() -> None:
     assert choose_candidate(_reports(), "frozen", 0.5, "d1")["iteration"] == 750
 
 
+def test_depth_selection_infer_preregisters_extension_steps() -> None:
+    from examples.umift.depth_selection import EXTENSION_ITERATIONS, ITERATIONS
+
+    assert EXTENSION_ITERATIONS == (1250, 1500)
+    assert set(ITERATIONS).isdisjoint(EXTENSION_ITERATIONS)
+
+
 def test_depth_selection_accepts_registered_extension_candidates() -> None:
     from examples.umift.depth_selection import choose_candidate
 
