@@ -71,7 +71,7 @@ class UMIFTDepthModel(OmniMoTModel):
             raise ValueError(f'D1 synchronized invalid depth batch: {gathered}')
         aux = results[0].loss
         loss = fm_loss + self.depth_aux_weight * aux
-        output.update(depth_aux_loss=aux.detach(), depth_aux_mae_m=aux.detach() * 0.5,
+        output.update(depth_aux_objective=aux, depth_aux_loss=aux.detach(), depth_aux_mae_m=aux.detach() * 0.5,
                       depth_aux_weight=torch.tensor(self.depth_aux_weight, device=device),
                       loss_fm_before_depth=fm_loss.detach())
         return output, loss

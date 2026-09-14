@@ -34,15 +34,20 @@ def main():
     model.on_train_start(cfg.trainer.memory_format)
     trainer.checkpointer.load(model)
     optimizer, scheduler = model.init_optimizer_scheduler(cfg.optimizer, cfg.scheduler)
-    params = [p for group in optimizer.param_groups for p in group['params']]
+    params = [p for opt in optimizer.optimizers for group in opt.param_groups for p in group['params']]
     loader.set_start_iteration(0); iterator = iter(loader); model.train()
     rows = []
+    def synchronized_check(valid, message):
+        bad = torch.tensor(int(not valid), device='cuda')
+        dist.all_reduce(bad, op=dist.ReduceOp.MAX)
+        if bad.item(): raise ValueError(message)
     def local(t): return t.to_local() if hasattr(t, 'to_local') else t
     for draw in range(args.draws):
         batch = misc.to(next(iterator), device='cuda')
         ep = _first_int(batch['episode_id']); start = _first_int(batch['window_start'])
-        if ep in (13,43,49): raise ValueError('heldout entered calibration')
+        synchronized_check(ep not in (13,43,49), 'heldout entered calibration')
         fm_grads = []
+        torch.cuda.reset_peak_memory_stats()
         for pass_index, weight in enumerate((0.0, 1.0)):
             optimizer.zero_grad(set_to_none=True)
             reset_probe_rng(draw, rank)
@@ -50,8 +55,9 @@ def main():
             output, loss = model.training_step(batch, draw)
             identity = tensor_tree_sha256([output['x0'],output['xt'],output['sigma']])
             if pass_index == 0: first_identity = identity
-            elif identity != first_identity: raise ValueError('calibration paired latent/noise mismatch')
-            loss.backward()
+            else: synchronized_check(identity == first_identity, 'calibration paired latent/noise mismatch')
+            objective = loss if pass_index == 0 else output['depth_aux_objective']
+            objective.backward()
             if pass_index == 0:
                 fm_value = float(loss.detach())
                 fm_grads = [None if p.grad is None else local(p.grad).detach().float().cpu().clone() for p in params]
@@ -59,14 +65,15 @@ def main():
                 fm_sq = aux_sq = dot = 0.0
                 for p,g0 in zip(params,fm_grads,strict=True):
                     if p.grad is None:
-                        if g0 is not None: raise ValueError('gradient presence changed')
-                        continue
-                    g1 = local(p.grad).detach().float().cpu()
+                        if g0 is None: continue
+                        g1 = torch.zeros_like(g0)
+                    else:
+                        g1 = local(p.grad).detach().float().cpu()
                     if g0 is None: g0 = torch.zeros_like(g1)
-                    ga = g1-g0
-                    fm_sq += float(g0.double().square().sum())
-                    aux_sq += float(ga.double().square().sum())
-                    dot += float((g0.double()*ga.double()).sum())
+                    ga = g1
+                    fm_sq += float(g0.square().sum(dtype=torch.float64))
+                    aux_sq += float(ga.square().sum(dtype=torch.float64))
+                    dot += float((g0*ga).sum(dtype=torch.float64))
                 sums = torch.tensor([fm_sq,aux_sq,dot],dtype=torch.float64,device='cuda')
                 dist.all_reduce(sums)
                 f,a,d=sums.cpu().tolist()
@@ -80,7 +87,7 @@ def main():
     all_rows=[None]*4; dist.all_gather_object(all_rows,rows)
     if rank==0:
         f=np.median([r['fm_grad_norm'] for r in rows]); a=np.median([r['aux_grad_norm'] for r in rows])
-        result=dict(protocol='d1-train-gradient-calibration-v1',windows=args.draws*4,
+        result=dict(protocol='d1-train-gradient-calibration-v1',windows=args.draws*4,global_gradient_samples=args.draws,gradient_method='independent_fm_and_aux_backward',
                     lambda_depth=float(.1*f/a),target_initial_gradient_ratio=.1,
                     parameter_updates=0,checkpoint=os.environ['BASE_CHECKPOINT_PATH'],
                     rows=[r for rr in all_rows for r in rr])
