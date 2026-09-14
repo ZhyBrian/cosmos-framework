@@ -261,7 +261,7 @@ def encode_video(
     clock = Fraction(1, 1_000_000)
     durations = np.r_[np.diff(elapsed), elapsed[-1] - elapsed[-2]]
     with av.open(str(path), mode="w", options={"movflags": "+faststart"}) as container:
-        stream = container.add_stream("libx264", rate=FPS, options={"preset": "fast", "crf": "16", "bf": "0"})
+        stream = container.add_stream("libx264", rate=FPS, options={"preset": "fast", "crf": "14", "bf": "0"})
         stream.width, stream.height = WIDTH, HEIGHT
         stream.pix_fmt = "yuv444p"
         stream.time_base = stream.codec_context.time_base = clock
