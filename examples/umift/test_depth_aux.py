@@ -39,6 +39,15 @@ class _BFloat16CanvasDecoder(torch.nn.Module):
 
 
 class DepthAuxTest(unittest.TestCase):
+    def test_clip_level_sigma_broadcast(self):
+        x0 = torch.ones(1, 2, 6, 1, 1)
+        noise = torch.zeros_like(x0)
+        mask = torch.tensor([1, 1, 0, 0, 0, 0]).view(6, 1, 1)
+        xt = x0 * 0.7
+        pred = noise - x0
+        result = reconstruct_clean_latent(x0, xt, pred, torch.tensor([0.3]), mask)
+        torch.testing.assert_close(result, x0)
+
     def test_reconstruction_recovers_clean_and_refills_history(self) -> None:
         x0 = torch.arange(6.0).view(1, 6, 1, 1).expand(2, -1, 2, 2)
         noise = x0 + 3.0

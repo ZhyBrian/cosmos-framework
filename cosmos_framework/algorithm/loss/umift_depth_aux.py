@@ -37,6 +37,10 @@ def _as_batched_latent(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, b
 
 
 def _broadcast_sigma(sigma: torch.Tensor, batch: int, timesteps: int) -> torch.Tensor:
+    if sigma.numel() == 1:
+        return sigma.reshape(1, 1, 1, 1, 1)
+    if sigma.ndim == 2 and sigma.shape == (batch, 1):
+        return sigma.reshape(batch, 1, 1, 1, 1)
     if sigma.ndim == 1 and sigma.shape[0] == timesteps:
         return sigma.view(1, 1, timesteps, 1, 1)
     if sigma.ndim == 2 and sigma.shape == (batch, timesteps):
