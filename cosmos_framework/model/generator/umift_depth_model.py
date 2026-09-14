@@ -39,7 +39,7 @@ class UMIFTDepthModel(OmniMoTModel):
             canvas = data_batch['video'][0]
             while canvas.ndim > 4 and canvas.shape[0] == 1:
                 canvas = canvas[0]
-            expected = (canvas[:, :, :, 256:].float().mean(0) + 1) / 4
+            expected = ((canvas[:, :, :, 256:].float().mean(0) + 1) / 4).to(device)
             if depth.numel() != expected.numel() or not torch.allclose(
                 depth.reshape_as(expected).float(), expected, atol=1e-6, rtol=0
             ):
@@ -54,7 +54,9 @@ class UMIFTDepthModel(OmniMoTModel):
             ))
             if bool(results[0].has_empty_support):
                 raise ValueError('future depth frame has no valid support')
-        except (ValueError, KeyError, TypeError) as exc:
+            if not bool(torch.isfinite(results[0].loss).item()):
+                raise ValueError('depth auxiliary loss is non-finite')
+        except (ValueError, KeyError, TypeError, RuntimeError) as exc:
             errors.append(str(exc))
         # All ranks enter the same check before any backward/FSDP gradient collective.
         bad = torch.tensor(int(bool(errors)), device=device)

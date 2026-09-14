@@ -79,17 +79,25 @@ def load_protocol(path: Path) -> tuple[dict,str]:
     return p,file_sha(path)
 
 
-def infer(args):
+def infer(
+    args,
+    *,
+    protocol_loader=load_protocol,
+    iterations=ITERATIONS,
+    candidate_validator=validate_candidate_identity,
+    identity=None,
+):
     import torch
     from cosmos_framework.data.generator.action.datasets.umift_rgbd_dataset import get_umift_rgbd_sft_dataset
     from cosmos_framework.inference.common.init import init_script
     from examples.umift.rgbd_infer import build_rgbd_batch,load_rgbd_model,run_rgbd_prediction,split_prediction
     from examples.umift.infer import _move_batch_to_cuda,validate_independent_parallelism,validate_launch_environment
     validate_launch_environment(os.environ);init_script()
-    p,sha=load_protocol(args.protocol)
-    if args.iteration not in ITERATIONS:raise ValueError('candidate not preregistered')
-    validate_candidate_identity(args.checkpoint,args.iteration)
+    p,sha=protocol_loader(args.protocol)
+    if args.iteration not in iterations:raise ValueError('candidate not preregistered')
+    candidate_validator(args.checkpoint,args.iteration)
     model,resolved,evidence=load_rgbd_model(args.sft_toml,args.checkpoint)
+    identity={'experiment_id':'E3-Dout'} if identity is None else dict(identity)
     validate_independent_parallelism(model.parallel_dims)
     ds=get_umift_rgbd_sft_dataset(p['zarr_path'],split='history',history_frames=5,
         tokenizer_config=resolved.model.config.vlm_config.tokenizer,
@@ -116,7 +124,7 @@ def infer(args):
                          'history_padding_count':s['history_padding_count']})
             print(json.dumps(dict(window_done=i,iteration=args.iteration)),flush=True)
     if file_sha(args.protocol)!=sha:raise ValueError('protocol changed during inference')
-    (args.output/f'rank_{rank}.json').write_text(json.dumps(dict(history_frames=5,experiment_id='E3-Dout',
+    (args.output/f'rank_{rank}.json').write_text(json.dumps(dict(history_frames=5,**identity,
         iteration=args.iteration,protocol_sha256=sha,load_evidence=evidence,rank=rank,rows=rows,complete=True),indent=2)+'\n')
     torch.distributed.barrier();torch.distributed.destroy_process_group()
 
@@ -129,13 +137,24 @@ def _flat(rgb_metrics,depth_metrics):
             'depth_out_of_range_fraction':depth_metrics['mean']['depth_out_of_range_fraction']}
 
 
-def score(args):
+def score(
+    args,
+    *,
+    protocol_loader=load_protocol,
+    candidate_validator=validate_candidate_identity,
+    identity=None,
+):
     from examples.umift.evaluate import aggregate_session_equal,evaluate_video_pair
     from examples.umift.score_refit_reference import _lpips_metric
-    p,sha=load_protocol(args.protocol)
+    p,sha=protocol_loader(args.protocol)
+    expected_identity=None if identity is None else dict(identity)
+    report_identity={'experiment_id':'E3-Dout'} if identity is None else dict(identity)
     ranks=[json.loads((args.input/f'rank_{r}.json').read_text()) for r in range(4)]
-    identity={(r['iteration'],r['load_evidence']['checkpoint']) for r in ranks}
-    if len(identity)!=1 or any(r['protocol_sha256']!=sha or not r['complete'] for r in ranks):
+    model_identity={(r['iteration'],r['load_evidence']['checkpoint']) for r in ranks}
+    if (len(model_identity)!=1
+            or any(r['protocol_sha256']!=sha or not r['complete']
+                   or (expected_identity is not None
+                       and any(r.get(k)!=v for k,v in expected_identity.items())) for r in ranks)):
         raise ValueError('rank identities or completion disagree')
     rows=sorted([w for r in ranks for w in r['rows']],key=lambda w:w['window_index'])
     if [r['window_index'] for r in rows]!=list(range(24)):raise ValueError('missing/duplicate window')
@@ -155,8 +174,8 @@ def score(args):
     agg=aggregate_session_equal(model_flat);pagg=aggregate_session_equal(p_flat)
     overall,baseline=agg['overall'],pagg['overall']
     value=joint_selection_score(overall['lpips'],overall['depth_mae_m'],baseline['lpips'],baseline['depth_mae_m'],rgb_weight=p['rgb_weight'])
-    iteration,checkpoint=next(iter(identity));validate_candidate_identity(Path(checkpoint),iteration)
-    report=dict(experiment_id='E3-Dout',history_frames=5,iteration=iteration,checkpoint=checkpoint,
+    iteration,checkpoint=next(iter(model_identity));candidate_validator(Path(checkpoint),iteration)
+    report=dict(**report_identity,history_frames=5,iteration=iteration,checkpoint=checkpoint,
         protocol_sha256=sha,rgb_weight=p['rgb_weight'],selection_uses_test_episodes=True,
         session_equal_aggregate=agg,persistence_session_equal_aggregate=pagg,joint_score=value,windows=results)
     out=args.input/'metrics.json'
@@ -165,12 +184,28 @@ def score(args):
     print(json.dumps(dict(iteration=iteration,joint_score=value,overall=overall,persistence=baseline)))
 
 
-def choose_candidate(reports: list[dict], protocol_sha: str, rgb_weight: float) -> dict:
-    if sorted(r['iteration'] for r in reports)!=list(ITERATIONS):raise ValueError('need six distinct candidates')
+def choose_candidate(
+    reports: list[dict],
+    protocol_sha: str,
+    rgb_weight: float,
+    *,
+    iterations=ITERATIONS,
+    candidate_validator=validate_candidate_identity,
+    identity=None,
+) -> dict:
+    if sorted(r['iteration'] for r in reports)!=list(iterations):
+        message = (
+            'need six distinct candidates'
+            if tuple(iterations) == ITERATIONS
+            else 'need four distinct candidates'
+        )
+        raise ValueError(message)
+    identity={'experiment_id':'E3-Dout'} if identity is None else dict(identity)
     baseline=None;scores={}
     for r in reports:
-        validate_candidate_identity(Path(r['checkpoint']),r['iteration'])
-        if (r['protocol_sha256']!=protocol_sha or r['history_frames']!=5 or r['experiment_id']!='E3-Dout'
+        candidate_validator(Path(r['checkpoint']),r['iteration'])
+        if (r['protocol_sha256']!=protocol_sha or r['history_frames']!=5
+                or any(r.get(k)!=v for k,v in identity.items())
                 or r['rgb_weight']!=rgb_weight):raise ValueError('candidate protocol or weight differs')
         a,b=r['session_equal_aggregate']['overall'],r['persistence_session_equal_aggregate']['overall']
         bp=(b['lpips'],b['depth_mae_m'])
