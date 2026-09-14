@@ -39,12 +39,15 @@ def bind_manifest(
     selection_file: Path,
     selection_sha256: str,
     start_percent: int,
+    experiment_id: str = "E3-Dout",
+    protocol: str = "e3-dout-rgbd-open-loop-v1",
+    arm: str | None = None,
 ) -> dict[str, Any]:
     """Copy immutable suffix identities and add only E3 protocol/checkpoint bindings."""
     result = copy.deepcopy(parent)
     result.update(
-        experiment_id="E3-Dout",
-        protocol="e3-dout-rgbd-open-loop-v1",
+        experiment_id=experiment_id,
+        protocol=protocol,
         history_frames=5,
         future_frames=16,
         selected_iteration=int(selection["iteration"]),
@@ -71,10 +74,12 @@ def bind_manifest(
         zarr_complete_manifest_bytes=13403184883,
     )
     result.pop("checkpoint_selection_sha256", None)
+    if arm is not None:
+        result["arm"] = arm
     for episode in result["episodes"]:
         anchor = int(episode.get("initial_source_frame", 0))
         episode.update(
-            experiment_id="E3-Dout",
+            experiment_id=experiment_id,
             start_percent=int(start_percent),
             initial_source_frame=anchor,
             initial_selected_frame=int(episode.get("initial_selected_frame", 0)),
@@ -86,6 +91,8 @@ def bind_manifest(
             history_frames=5,
             history_padding_count=int(sum(anchor - 2 * offset < 0 for offset in range(5))),
         )
+        if arm is not None:
+            episode["arm"] = arm
     return result
 
 
@@ -214,7 +221,14 @@ def _materialize_truth(manifest: dict[str, Any], destination: Path) -> None:
         )
 
 
-def prepare(args: argparse.Namespace) -> Path:
+def prepare(
+    args: argparse.Namespace,
+    *,
+    selection_validator=_validate_selection,
+    experiment_id: str = "E3-Dout",
+    protocol: str = "e3-dout-rgbd-open-loop-v1",
+    arm: str | None = None,
+) -> Path:
     source_manifest, expected_sha = PARENT_MANIFESTS[int(args.start_percent)]
     if args.source_manifest is not None:
         source_manifest = args.source_manifest.resolve()
@@ -227,7 +241,7 @@ def prepare(args: argparse.Namespace) -> Path:
         or tuple(episode["episode_id"] for episode in parent.get("episodes", [])) != EPISODES
     ):
         raise ValueError("source suffix does not contain the frozen base identity and held-out episodes")
-    selection, selection_sha, selection_protocol = _validate_selection(args.selection.resolve())
+    selection, selection_sha, selection_protocol = selection_validator(args.selection.resolve())
     if str(Path(selection_protocol["zarr_path"]).resolve()) != str(Path(parent["zarr_path"]).resolve()):
         raise ValueError("selection and long suffixes use different canonical Zarr roots")
     manifest = bind_manifest(
@@ -238,6 +252,9 @@ def prepare(args: argparse.Namespace) -> Path:
         selection_file=args.selection.resolve(),
         selection_sha256=selection_sha,
         start_percent=int(args.start_percent),
+        experiment_id=experiment_id,
+        protocol=protocol,
+        arm=arm,
     )
     destination = args.root.resolve() / "prepared"
     destination.mkdir(parents=True, exist_ok=False)

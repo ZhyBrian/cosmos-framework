@@ -105,6 +105,8 @@ def _validate_episode_arrays(
     truth_rgb: np.ndarray,
     truth_depth_m: np.ndarray,
     predictions: dict[str, tuple[np.ndarray, np.ndarray]],
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
 ) -> None:
     if truth_rgb.dtype != np.float32 or truth_depth_m.dtype != np.float32:
         raise ValueError("RGB and depth truth must use float32")
@@ -116,8 +118,8 @@ def _validate_episode_arrays(
         raise ValueError("truth must have matching RGB THWC and depth THW shapes")
     _validate_finite_range(truth_rgb, label="RGB truth", lower=0.0, upper=1.0)
     _validate_finite_range(truth_depth_m, label="depth truth", lower=0.0, upper=0.5)
-    if tuple(predictions) != MODEL_METHODS:
-        raise ValueError(f"predictions must contain methods in order {MODEL_METHODS}")
+    if tuple(predictions) != model_methods:
+        raise ValueError(f"predictions must contain methods in order {model_methods}")
     for method, (rgb, depth_m) in predictions.items():
         if rgb.dtype != np.float32 or depth_m.dtype != np.float32:
             raise ValueError(f"{method} RGB and raw depth predictions must use float32")
@@ -248,9 +250,12 @@ def score_episode_arrays(
     first_block_steps: int,
     evaluate_video_pair_fn: Callable[..., dict[str, Any]],
     lpips_metric: Any,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
 ) -> dict[str, dict[str, Any]]:
     """Score P/B0/E3-A/E3-Z/E3-S for one complete suffix without changing input arrays."""
-    _validate_episode_arrays(truth_rgb, truth_depth_m, predictions)
+    _validate_episode_arrays(
+        truth_rgb, truth_depth_m, predictions, model_methods=model_methods
+    )
     segments = segment_frame_indices(len(truth_rgb), first_block_steps)
     all_predictions = {
         "P": (
@@ -354,6 +359,9 @@ def _load_prediction(
     method: str,
     expected_rgb_shape: tuple[int, ...],
     expected_depth_shape: tuple[int, ...],
+    *,
+    experiment_id: str = "E3-Dout",
+    arm: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     label = int(episode["start_percent"])
     stem = (
@@ -379,6 +387,8 @@ def _load_prediction(
         or metadata.get("manifest_sha256") != manifest_sha
         or metadata.get("checkpoint_id") != expected_checkpoint
         or metadata.get("future_gt_refresh_count") != 0
+        or (arm is not None and metadata.get("arm") != arm)
+        or (arm is not None and metadata.get("experiment_id") != experiment_id)
     ):
         raise ValueError(
             f"{method} rollout metadata identity is invalid for episode {episode['episode_id']}"
@@ -440,10 +450,14 @@ def _load_prediction(
     )
 
 
-def _npz_frame_columns(episode_results: list[dict[str, Any]]) -> dict[str, np.ndarray]:
+def _npz_frame_columns(
+    episode_results: list[dict[str, Any]],
+    *,
+    methods: tuple[str, ...] = METHODS,
+) -> dict[str, np.ndarray]:
     records = []
     for episode in episode_results:
-        for method_index, method in enumerate(METHODS):
+        for method_index, method in enumerate(methods):
             for row in episode["scored"][method]["frames"]:
                 records.append(
                     {
@@ -455,7 +469,7 @@ def _npz_frame_columns(episode_results: list[dict[str, Any]]) -> dict[str, np.nd
                     }
                 )
     columns = {
-        "method_names": np.asarray(METHODS),
+        "method_names": np.asarray(methods),
         "method_index": np.asarray(
             [row["method_index"] for row in records], dtype=np.int16
         ),
@@ -478,7 +492,16 @@ def _npz_frame_columns(episode_results: list[dict[str, Any]]) -> dict[str, np.nd
     return columns
 
 
-def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
+def score_root(
+    root: Path,
+    output: Path | None = None,
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
+    experiment_id: str = "E3-Dout",
+    rollout_protocol: str = "e3-dout-rgbd-open-loop-v1",
+    scoring_protocol: str = "e3-dout-rgbd-full-suffix-scoring-v1",
+    arm: str | None = None,
+) -> dict[str, Any]:
     """Validate and score one complete prepared/inferred rollout root without modifying inputs."""
     from examples.umift.evaluate import evaluate_video_pair
     from examples.umift.rgbd_rollout import _validate_manifest
@@ -491,7 +514,14 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
     manifest_path = (root / "prepared" / "manifest.json").resolve()
     manifest_sha = file_sha(manifest_path)
     manifest = json.loads(manifest_path.read_text())
-    _validate_manifest(manifest, manifest_path)
+    _validate_manifest(
+        manifest,
+        manifest_path,
+        experiment_id=experiment_id,
+        protocol=rollout_protocol,
+        arm=arm,
+    )
+    methods = ("P", *model_methods)
     episodes = manifest.get("episodes", [])
     if len(episodes) != 3:
         raise ValueError("scoring requires the three prepared held-out sessions")
@@ -499,7 +529,7 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
     lpips_metric = _lpips_metric()
     episode_results = []
     aggregate_rows: dict[str, dict[str, list[dict[str, Any]]]] = {
-        method: {segment: [] for segment in SEGMENTS} for method in METHODS
+        method: {segment: [] for segment in SEGMENTS} for method in methods
     }
     for episode in episodes:
         input_hashes = episode.get("input_files_sha256")
@@ -527,7 +557,7 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
         first_block_steps = _validate_chunks(episode)
         predictions = {}
         inventories = {}
-        for method in MODEL_METHODS:
+        for method in model_methods:
             rgb, depth, inventory = _load_prediction(
                 root,
                 manifest,
@@ -536,6 +566,8 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
                 method,
                 rgb_shape,
                 depth_shape,
+                experiment_id=experiment_id,
+                arm=arm,
             )
             predictions[method] = (rgb, depth)
             inventories[method] = inventory
@@ -546,6 +578,7 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
             first_block_steps=first_block_steps,
             evaluate_video_pair_fn=evaluate_video_pair,
             lpips_metric=lpips_metric,
+            model_methods=model_methods,
         )
         episode_result = {
             "episode_id": int(episode["episode_id"]),
@@ -562,7 +595,7 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
         }
         episode_results.append(episode_result)
         segment_indexes = segment_frame_indices(frame_count, first_block_steps)
-        for method in METHODS:
+        for method in methods:
             by_index = {
                 int(row["frame_index"]): row for row in scored[method]["frames"]
             }
@@ -577,11 +610,11 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
             segment: aggregate_session_equal_frame_rows(rows)
             for segment, rows in aggregate_rows[method].items()
         }
-        for method in METHODS
+        for method in methods
     }
     output.mkdir(parents=True, exist_ok=False)
     frame_path = output / "frame_metrics.npz"
-    np.savez(frame_path, **_npz_frame_columns(episode_results))
+    np.savez(frame_path, **_npz_frame_columns(episode_results, methods=methods))
     compact_episodes = []
     for episode in episode_results:
         compact_episodes.append(
@@ -594,10 +627,10 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
             }
         )
     report = {
-        "protocol": "e3-dout-rgbd-full-suffix-scoring-v1",
-        "experiment_id": "E3-Dout",
+        "protocol": scoring_protocol,
+        "experiment_id": experiment_id,
         "complete": True,
-        "methods": list(METHODS),
+        "methods": list(methods),
         "segments": {
             "full_suffix": "all generated frames; observed anchor index 0 excluded",
             "first_block": "generated frames retained from prepared chunk 0",
@@ -633,6 +666,8 @@ def score_root(root: Path, output: Path | None = None) -> dict[str, Any]:
         "session_equal_aggregate": aggregates,
         "episodes": compact_episodes,
     }
+    if arm is not None:
+        report["arm"] = arm
     if file_sha(manifest_path) != manifest_sha:
         raise ValueError("prepared manifest changed during scoring")
     report_path = output / "metrics.json"

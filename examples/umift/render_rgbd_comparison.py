@@ -115,13 +115,15 @@ def panels_at(
     truth_depth_m: np.ndarray,
     predictions: dict[str, tuple[np.ndarray, np.ndarray]],
     frame_index: int,
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
 ) -> list[Image.Image]:
     """Build six RGB and six depth panels without applying a GT mask to predictions."""
     sources: dict[str, tuple[np.ndarray, np.ndarray]] = {
         "GT": (truth_rgb[frame_index], truth_depth_m[frame_index]),
         "P": (truth_rgb[0], truth_depth_m[0]),
     }
-    for method in MODEL_METHODS:
+    for method in model_methods:
         if method not in predictions:
             raise ValueError(f"missing RGBD prediction method {method}")
         if frame_index == 0:
@@ -132,7 +134,12 @@ def panels_at(
                 predictions[method][1][frame_index],
             )
     panels = []
-    for method, modality in PANEL_SPECS:
+    panel_specs = tuple(
+        (method, modality)
+        for modality in MODALITIES
+        for method in ("GT", "P", *model_methods)
+    )
+    for method, modality in panel_specs:
         rgb, depth = sources[method]
         panels.append(_rgb_panel(rgb) if modality == "rgb" else _depth_panel(depth))
     return panels
@@ -169,6 +176,12 @@ def make_frame(
     episode: dict[str, Any],
     sample_index: int,
     fonts: tuple[ImageFont.ImageFont, ImageFont.ImageFont, ImageFont.ImageFont],
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
+    title_text: str = "Cosmos3 E3-Dout · RGB / 米制深度十二格全后缀比较",
+    headings: tuple[str, ...] = (
+        "GT", "P 首帧保持", "B0 基础 Edge", "E3-A 正确动作", "E3-Z 静止动作", "E3-S 错配动作"
+    ),
 ) -> Image.Image:
     canvas = Image.new("RGB", (WIDTH, HEIGHT), "#101827")
     draw = ImageDraw.Draw(canvas)
@@ -176,7 +189,7 @@ def make_frame(
     block = _chunk_for_frame(episode["chunks"], frame_index)
     block_text = "真实 H5 RGBD 当前帧" if block is None else f"block {block} · 生成 RGBD 自反馈"
     selected_iteration = int(episode["selected_iteration"])
-    draw.text((16, 10), "Cosmos3 E3-Dout · RGB / 米制深度十二格全后缀比较", font=title, fill="#F4F7FB")
+    draw.text((16, 10), title_text, font=title, fill="#F4F7FB")
     draw.text(
         (16, 58),
         f"样本 {sample_index}/3 · episode {episode['episode_id']} · 起点 {episode['start_percent']}% · "
@@ -184,7 +197,6 @@ def make_frame(
         font=normal,
         fill="#CBD5E1",
     )
-    headings = ("GT", "P 首帧保持", "B0 基础 Edge", "E3-A 正确动作", "E3-Z 静止动作", "E3-S 错配动作")
     for column, heading in enumerate(headings):
         x = PANEL_BOXES[column][0]
         detail = (
@@ -194,8 +206,11 @@ def make_frame(
         )
         draw.text((x, 105), heading, font=normal, fill="#F4F7FB")
         draw.text((x, 132), detail, font=small, fill="#AABAD0")
-    panels = panels_at(truth_rgb, truth_depth_m, predictions, frame_index)
-    for panel, (method, modality), (x, y) in zip(panels, PANEL_SPECS, PANEL_BOXES, strict=True):
+    panel_specs = tuple((method, modality) for modality in MODALITIES for method in ("GT", "P", *model_methods))
+    panels = panels_at(
+        truth_rgb, truth_depth_m, predictions, frame_index, model_methods=model_methods
+    )
+    for panel, (method, modality), (x, y) in zip(panels, panel_specs, PANEL_BOXES, strict=True):
         canvas.paste(panel, (x, y))
         draw.rectangle((x - 1, y - 1, x + PANEL_SIZE, y + PANEL_SIZE), outline="#597187", width=1)
         if method == "GT":
@@ -234,6 +249,12 @@ def encode_video(
     elapsed: np.ndarray,
     sample_index: int,
     fonts: tuple[ImageFont.ImageFont, ImageFont.ImageFont, ImageFont.ImageFont],
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
+    title_text: str = "Cosmos3 E3-Dout · RGB / 米制深度十二格全后缀比较",
+    headings: tuple[str, ...] = (
+        "GT", "P 首帧保持", "B0 基础 Edge", "E3-A 正确动作", "E3-Z 静止动作", "E3-S 错配动作"
+    ),
 ) -> None:
     import av
 
@@ -265,6 +286,9 @@ def encode_video(
                 episode,
                 sample_index,
                 fonts,
+                model_methods=model_methods,
+                title_text=title_text,
+                headings=headings,
             )
             frame = av.VideoFrame.from_image(image)
             frame.time_base = clock
@@ -292,6 +316,8 @@ def verify_video(
     predictions: dict[str, tuple[np.ndarray, np.ndarray]],
     episode: dict[str, Any],
     elapsed: np.ndarray,
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
 ) -> dict[str, Any]:
     import av
 
@@ -319,7 +345,13 @@ def verify_video(
                 raise ValueError(f"PTS differs from source timestamp at frame {frame_index}: {error}")
             if frame_index in inspect:
                 decoded = frame.to_ndarray(format="rgb24")
-                expected_panels = panels_at(truth_rgb, truth_depth_m, predictions, frame_index)
+                expected_panels = panels_at(
+                    truth_rgb,
+                    truth_depth_m,
+                    predictions,
+                    frame_index,
+                    model_methods=model_methods,
+                )
                 for expected, (x, y) in zip(expected_panels, PANEL_BOXES, strict=True):
                     patch = decoded[y : y + PANEL_SIZE, x : x + PANEL_SIZE].astype(np.float32)
                     mae = float(np.abs(patch - np.asarray(expected, dtype=np.float32)).mean())
@@ -345,7 +377,7 @@ def verify_video(
         "codec": "h264",
         "pixel_format": "yuv444p",
         "verified_frame_indices": sorted(inspect),
-        "verified_panel_count": len(PANEL_SPECS),
+        "verified_panel_count": 2 * (2 + len(model_methods)),
         "max_pts_error_seconds": max_pts_error,
         "max_panel_encoding_mae_0_255": max_panel_mae,
         "sha256": file_sha(path),
@@ -421,16 +453,22 @@ def _validate_scoring(
     manifest_path: Path,
     manifest: dict[str, Any],
     manifest_sha: str,
+    *,
+    scoring_methods: tuple[str, ...] = SCORING_METHODS,
+    experiment_id: str = "E3-Dout",
+    scoring_protocol: str = "e3-dout-rgbd-full-suffix-scoring-v1",
+    arm: str | None = None,
 ) -> tuple[dict[str, Any], tuple[Path, Path]]:
     scoring_root = (root / "scoring").resolve()
     metrics_path = scoring_root / "metrics.json"
     frame_path = scoring_root / "frame_metrics.npz"
     report = _read_json(metrics_path)
     if (
-        report.get("protocol") != "e3-dout-rgbd-full-suffix-scoring-v1"
-        or report.get("experiment_id") != "E3-Dout"
+        report.get("protocol") != scoring_protocol
+        or report.get("experiment_id") != experiment_id
+        or (arm is not None and report.get("arm") != arm)
         or report.get("complete") is not True
-        or report.get("methods") != list(SCORING_METHODS)
+        or report.get("methods") != list(scoring_methods)
         or Path(report.get("manifest_path", "")).resolve() != manifest_path.resolve()
         or report.get("manifest_sha256") != manifest_sha
         or Path(report.get("frame_metrics_npz", "")).resolve() != frame_path
@@ -442,7 +480,7 @@ def _validate_scoring(
 
     expected_rows = []
     for episode in manifest.get("episodes", []):
-        for method_index in range(len(SCORING_METHODS)):
+        for method_index in range(len(scoring_methods)):
             for frame_index in range(1, int(episode["frame_count"])):
                 expected_rows.append(
                     (
@@ -465,7 +503,7 @@ def _validate_scoring(
     with np.load(frame_path, allow_pickle=False) as archive:
         if set(archive.files) != expected_keys:
             raise ValueError("scoring frame_metrics NPZ schema differs from the scoring contract")
-        if tuple(archive["method_names"].tolist()) != SCORING_METHODS:
+        if tuple(archive["method_names"].tolist()) != scoring_methods:
             raise ValueError("scoring frame_metrics method lookup differs from the scoring contract")
         columns = {
             "method_index": np.asarray(archive["method_index"]),
@@ -516,13 +554,20 @@ def _validate_scoring(
 
 
 def _validate_metadata(
-    path: Path, episode: dict[str, Any], method: str, manifest_sha: str, checkpoint: str
+    path: Path,
+    episode: dict[str, Any],
+    method: str,
+    manifest_sha: str,
+    checkpoint: str,
+    *,
+    experiment_id: str = "E3-Dout",
+    arm: str | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     record = _read_json(path)
     frame_indices_sha = _bound_input_sha(episode, Path(episode["frame_indices_path"]))
     true_pts_sha = array_sha(np.asarray(episode["true_pts"], dtype=np.float64))
     for field, expected in (
-        ("experiment_id", "E3-Dout"),
+        ("experiment_id", experiment_id),
         ("method", method),
         ("episode_id", episode["episode_id"]),
         ("start_percent", episode["start_percent"]),
@@ -536,6 +581,8 @@ def _validate_metadata(
     ):
         if record.get(field) != expected:
             raise ValueError(f"{method}: rollout metadata mismatch for {field}")
+    if arm is not None and record.get("arm") != arm:
+        raise ValueError(f"{method}: rollout metadata mismatch for arm")
     if record.get("complete_requested_suffix") is not True or record.get("initial_h5_rgbd_only") is not True:
         raise ValueError(f"{method}: rollout is incomplete or refreshed from future GT")
     rgb_path = Path(record["rgb_path"])
@@ -554,7 +601,7 @@ def _validate_metadata(
         for field in ("index", "output_start", "steps", "noise_seed"):
             if actual.get(field) != expected_chunk[field]:
                 raise ValueError(f"{method}: frozen block identity differs for {field}")
-        action_key = "A" if method in ("B0", "E3-A") else method[-1]
+        action_key = "A" if method == "B0" else method[-1]
         expected_action_hash = expected_chunk[f"{action_key}_physical_action_sha256"]
         if actual.get("physical_action_sha256") != expected_action_hash:
             raise ValueError(f"{method}: physical action hash differs from the frozen fixture")
@@ -587,7 +634,9 @@ def _font_set(font_path: Path) -> tuple[ImageFont.ImageFont, ImageFont.ImageFont
     return tuple(ImageFont.truetype(str(font_path), size, index=2) for size in (36, 22, 17))
 
 
-def _write_html(destination: Path, inventory: dict[str, Any]) -> Path:
+def _write_html(
+    destination: Path, inventory: dict[str, Any], *, title_text: str = "E3-Dout"
+) -> Path:
     cards = []
     for item in inventory["episodes"]:
         video = html.escape(item["outputs"]["video"]["file"])
@@ -598,10 +647,10 @@ def _write_html(destination: Path, inventory: dict[str, Any]) -> Path:
             f'<video controls preload="metadata" poster="{poster}" src="{video}"></video></section>'
         )
     content = (
-        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>E3-Dout RGBD</title>'
+        f'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>{html.escape(title_text)} RGBD</title>'
         '<style>body{background:#101827;color:#f4f7fb;font:17px system-ui;max-width:1500px;margin:30px auto;'
         'padding:0 20px;line-height:1.65}video{width:100%;background:#000}section{margin:38px 0}</style></head><body>'
-        '<h1>E3-Dout RGB / depth 十二格全后缀比较</h1><p>六种方法按列，上行为 RGB，下行为米制 depth。'
+        f'<h1>{html.escape(title_text)} RGB / depth 十二格全后缀比较</h1><p>六种方法按列，上行为 RGB，下行为米制 depth。'
         'B0 是未微调 Edge，并非 RGBD 预训练模型。所有生成方法仅用初始真实 H5 RGBD，后续跨块使用自身浮点预测反馈。'
         '深度固定为蓝（近）—灰—红（远），范围 0–0.5 米，越界值仅在显示时夹到端点。'
         '灰黑只表示该格深度恰为 0；预测没有独立有效性 mask，也不使用 GT mask。'
@@ -614,7 +663,21 @@ def _write_html(destination: Path, inventory: dict[str, Any]) -> Path:
     return path
 
 
-def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
+def render(
+    root: Path,
+    destination: Path,
+    font_path: Path,
+    *,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
+    experiment_id: str = "E3-Dout",
+    rollout_protocol: str = "e3-dout-rgbd-open-loop-v1",
+    scoring_protocol: str = "e3-dout-rgbd-full-suffix-scoring-v1",
+    arm: str | None = None,
+    title_text: str = "E3-Dout",
+    headings: tuple[str, ...] = (
+        "GT", "P 首帧保持", "B0 基础 Edge", "E3-A 正确动作", "E3-Z 静止动作", "E3-S 错配动作"
+    ),
+) -> dict[str, Any]:
     root, destination, font_path = root.resolve(), destination.resolve(), font_path.resolve()
     if destination.exists():
         raise FileExistsError(destination)
@@ -623,7 +686,9 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
     manifest_path = root / "prepared" / "manifest.json"
     manifest = _read_json(manifest_path)
     manifest_sha = file_sha(manifest_path)
-    if manifest.get("experiment_id") != "E3-Dout" or manifest.get("protocol") != "e3-dout-rgbd-open-loop-v1":
+    if (manifest.get("experiment_id") != experiment_id
+            or manifest.get("protocol") != rollout_protocol
+            or (arm is not None and manifest.get("arm") != arm)):
         raise ValueError("renderer requires an E3-Dout RGBD rollout manifest")
     episodes = manifest.get("episodes")
     if not isinstance(episodes, list) or len(episodes) != 3:
@@ -642,10 +707,17 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
         if (
             record.get("complete") is not True
             or record.get("load_evidence", {}).get("checkpoint") != checkpoint
+            or (arm is not None and record.get("arm") != arm)
+            or (arm is not None and record.get("experiment_id") != experiment_id)
         ):
             raise ValueError("run evidence is incomplete or identifies the wrong strict-loaded checkpoint")
+    scoring_methods = ("P", *model_methods)
     scoring_evidence, scoring_paths = _validate_scoring(
-        root, manifest_path, manifest, manifest_sha
+        root, manifest_path, manifest, manifest_sha,
+        scoring_methods=scoring_methods,
+        experiment_id=experiment_id,
+        scoring_protocol=scoring_protocol,
+        arm=arm,
     )
     protected = {manifest_path, font_path, *run_evidence, *scoring_paths}
     prepared = []
@@ -673,11 +745,13 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
         predictions = {}
         metadata = {}
         source_paths = {}
-        for method in MODEL_METHODS:
+        for method in model_methods:
             checkpoint = manifest["base_checkpoint"] if method == "B0" else manifest["selected_checkpoint"]
             stem = root / "rgbd_inference" / method / f"episode_{episode['episode_id']}_start_{episode['start_percent']}"
             record, rgb_path, depth_path = _validate_metadata(
-                stem.with_suffix(".json"), episode, method, manifest_sha, checkpoint
+                stem.with_suffix(".json"), episode, method, manifest_sha, checkpoint,
+                experiment_id=experiment_id,
+                arm=arm,
             )
             rgb = _load_array(rgb_path, (frame_count, 256, 256, 3), bounded=True)
             depth = _load_array(depth_path, (frame_count, 256, 256), bounded=False)
@@ -700,9 +774,13 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
     posters.mkdir()
     fonts = _font_set(font_path)
     inventory = {
-        "experiment_id": "E3-Dout",
+        "experiment_id": experiment_id,
         "protocol": manifest["protocol"],
-        "panel_order": [list(spec) for spec in PANEL_SPECS],
+        "panel_order": [
+            [method, modality]
+            for modality in MODALITIES
+            for method in ("GT", "P", *model_methods)
+        ],
         "panel_layout": "six method columns; RGB top row; depth_m bottom row; no letterbox mask",
         "depth_display": "fixed blue-near through gray to red-far over 0-0.5m; display clips out-of-range values to endpoints; exact-zero gray-black sentinel; predictions have no independent validity mask and use no GT mask",
         "selected_iteration": manifest["selected_iteration"],
@@ -715,12 +793,22 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
         ],
         "episodes": [],
     }
+    if arm is not None:
+        inventory["arm"] = arm
     for sample_index, item in enumerate(prepared, start=1):
         episode, truth_rgb, truth_depth, elapsed, predictions, metadata, source_paths = item
         stem = f"episode_{episode['episode_id']}_start_{episode['start_percent']}"
         video_path = videos / f"{stem}_rgbd_comparison.mp4"
-        encode_video(video_path, truth_rgb, truth_depth, predictions, episode, elapsed, sample_index, fonts)
-        video_record = verify_video(video_path, truth_rgb, truth_depth, predictions, episode, elapsed)
+        encode_video(
+            video_path, truth_rgb, truth_depth, predictions, episode, elapsed,
+            sample_index, fonts, model_methods=model_methods,
+            title_text=f"Cosmos3 {title_text} · RGB / 米制深度十二格全后缀比较",
+            headings=headings,
+        )
+        video_record = verify_video(
+            video_path, truth_rgb, truth_depth, predictions, episode, elapsed,
+            model_methods=model_methods,
+        )
         video_record["file"] = str(video_path.relative_to(destination))
         poster_records = {}
         for label, frame_index in (
@@ -738,6 +826,9 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
                 episode,
                 sample_index,
                 fonts,
+                model_methods=model_methods,
+                title_text=f"Cosmos3 {title_text} · RGB / 米制深度十二格全后缀比较",
+                headings=headings,
             ).save(path)
             poster_records[label] = {
                 "file": str(path.relative_to(destination)),
@@ -759,7 +850,7 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
                         "rgb_sha256": before[source_paths[method][1]],
                         "raw_depth_m_sha256": before[source_paths[method][2]],
                     }
-                    for method in MODEL_METHODS
+                    for method in model_methods
                 },
             },
             "outputs": {"video": video_record, "posters": poster_records},
@@ -772,7 +863,7 @@ def render(root: Path, destination: Path, font_path: Path) -> dict[str, Any]:
     inventory["protected_inputs_unchanged"] = True
     inventory_path = destination / "inventory.json"
     inventory_path.write_text(json.dumps(inventory, indent=2, ensure_ascii=False) + "\n")
-    html_path = _write_html(destination, inventory)
+    html_path = _write_html(destination, inventory, title_text=title_text)
     inventory["artifacts"] = {
         "html": {"file": html_path.name, "sha256": file_sha(html_path)},
         "inventory": {"file": inventory_path.name},

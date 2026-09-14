@@ -21,6 +21,10 @@ def _make_continuation(name: str):
     experiment.trainer.max_iter = 1000
     experiment.checkpoint.load_training_state = False
     experiment.checkpoint.save_iter = 250
+    experiment.trainer.callbacks["matched_batch_evidence"] = {
+        "_target_": "examples.umift.matched_batch_evidence.MatchedBatchEvidence",
+        "num_microbatches": 8,
+    }
     return experiment
 
 

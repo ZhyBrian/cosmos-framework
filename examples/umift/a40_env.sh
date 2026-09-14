@@ -15,9 +15,9 @@ if [[ ! -f "$_umift_conda_sh" ]]; then
   return 2
 fi
 case "${CUDA_VISIBLE_DEVICES-}" in
-  0|0,1,2,3) ;;
+  0|0,1,2,3|4,5,6,7) ;;
   *)
-    echo "set CUDA_VISIBLE_DEVICES explicitly to 0 (attention) or 0,1,2,3 (model/train) before sourcing" >&2
+    echo "set CUDA_VISIBLE_DEVICES explicitly to 0 (attention), 0,1,2,3 or 4,5,6,7 (model/train) before sourcing" >&2
     return 2
     ;;
 esac

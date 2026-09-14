@@ -25,12 +25,16 @@ test ! -e "$TRAIN_ROOT"
 test ! -e "$LOG_ROOT/train_started_at_utc.txt"
 mkdir -p "$LOG_ROOT"
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+if [[ "$ARM" == "d1" ]]; then
+    export CUDA_VISIBLE_DEVICES=0,1,2,3
+else
+    export CUDA_VISIBLE_DEVICES=4,5,6,7
+fi
 source examples/umift/a40_env.sh
 export DATASET_PATH=/data/cosmos_datasets/umift_us_all_source_308f4d46.zarr
 export OMP_NUM_THREADS=1 UMIFT_STAGE=e1 PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1
 
-nvidia-smi -i 0,1,2,3 --query-gpu=memory.used --format=csv,noheader,nounits \
+nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-gpu=memory.used --format=csv,noheader,nounits \
     | awk '$1 > 256 { busy=1 } END { exit busy }'
 git rev-parse HEAD > "$LOG_ROOT/training_source_commit.txt"
 printf '%s\n' "$BASE_CHECKPOINT_PATH" > "$LOG_ROOT/base_checkpoint_path.txt"

@@ -232,10 +232,18 @@ def _run_evidence_path(output_root: Path, phase: str, rank: int) -> Path:
     return path
 
 
-def _validate_manifest(manifest: dict[str, Any], manifest_path: Path) -> None:
+def _validate_manifest(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    *,
+    experiment_id: str = "E3-Dout",
+    protocol: str = "e3-dout-rgbd-open-loop-v1",
+    arm: str | None = None,
+) -> None:
     if (
-        manifest.get("experiment_id") != "E3-Dout"
-        or manifest.get("protocol") != "e3-dout-rgbd-open-loop-v1"
+        manifest.get("experiment_id") != experiment_id
+        or manifest.get("protocol") != protocol
+        or (arm is not None and manifest.get("arm") != arm)
         or manifest.get("history_frames") != HISTORY_FRAMES
         or manifest.get("future_frames") != FUTURE_FRAMES
     ):
@@ -260,6 +268,8 @@ def _validate_manifest(manifest: dict[str, Any], manifest_path: Path) -> None:
     ):
         raise ValueError("prepared episodes differ from the bound source manifest")
     for source_episode, prepared_episode in zip(source_episodes, prepared_episodes, strict=True):
+        if arm is not None and prepared_episode.get("arm") != arm:
+            raise ValueError("prepared episode differs from the requested arm")
         for field in _SOURCE_EPISODE_FIELDS:
             if prepared_episode.get(field) != source_episode.get(field):
                 raise ValueError(
@@ -333,7 +343,14 @@ def _initial_history(zarr_path: str, episode: dict[str, Any]):
     return history, expected_indices, timestamps, real_mask
 
 
-def infer(args: argparse.Namespace) -> None:
+def infer(
+    args: argparse.Namespace,
+    *,
+    experiment_id: str = "E3-Dout",
+    protocol: str = "e3-dout-rgbd-open-loop-v1",
+    arm: str | None = None,
+    model_methods: tuple[str, ...] = MODEL_METHODS,
+) -> None:
     import torch
 
     from cosmos_framework.data.generator.action.datasets.umift_rgbd_dataset import (
@@ -352,7 +369,13 @@ def infer(args: argparse.Namespace) -> None:
     manifest_path = (args.root / "prepared" / "manifest.json").resolve()
     manifest_sha = file_sha(manifest_path)
     manifest = json.loads(manifest_path.read_text())
-    _validate_manifest(manifest, manifest_path)
+    _validate_manifest(
+        manifest,
+        manifest_path,
+        experiment_id=experiment_id,
+        protocol=protocol,
+        arm=arm,
+    )
     rank = get_rank()
     output_root = args.root / ("rgbd_smoke" if args.max_chunks else "rgbd_inference")
     run_path = _run_evidence_path(output_root, args.phase, rank)
@@ -367,7 +390,7 @@ def infer(args: argparse.Namespace) -> None:
         tokenizer_config=resolved.model.config.vlm_config.tokenizer,
         max_action_dim=int(resolved.model.config.max_action_dim),
     )
-    methods = ("B0",) if args.phase == "base" else (("E3-A",) if args.max_chunks else MODEL_METHODS[1:])
+    methods = ("B0",) if args.phase == "base" else ((model_methods[1],) if args.max_chunks else model_methods[1:])
     results = []
     started = time.perf_counter()
     torch.cuda.reset_peak_memory_stats()
@@ -393,7 +416,7 @@ def infer(args: argparse.Namespace) -> None:
                 manifest["zarr_path"], episode
             )
             for method in methods:
-                action_key = "A" if method in ("B0", "E3-A") else method[-1]
+                action_key = "A" if method == "B0" else method[-1]
                 physical_actions = action_arrays[action_key]
                 output_dir = output_root / method
                 output_dir.mkdir(parents=True, exist_ok=True)
@@ -455,7 +478,7 @@ def infer(args: argparse.Namespace) -> None:
                 depth_summary = _array_summary(depth_output, depth_m=True)
                 del rgb_output, depth_output
                 result = {
-                    "experiment_id": "E3-Dout",
+                    "experiment_id": experiment_id,
                     "protocol": manifest["protocol"],
                     "episode_id": episode["episode_id"],
                     "raw_session": episode["raw_session"],
@@ -499,13 +522,15 @@ def infer(args: argparse.Namespace) -> None:
                     "prediction_depth_validity": "no independent validity prediction; exact zero is display sentinel only",
                     "num_steps": int(manifest["num_steps"]),
                 }
+                if arm is not None:
+                    result["arm"] = arm
                 metadata_path.write_text(json.dumps(result, indent=2) + "\n")
                 results.append({"method": method, "episode": episode["episode_id"], "start": label, "frames": count})
                 print(json.dumps({"rgbd_rollout_done": results[-1]}), flush=True)
     if file_sha(manifest_path) != manifest_sha:
         raise ValueError("prepared manifest changed during inference")
     report = {
-        "experiment_id": "E3-Dout",
+        "experiment_id": experiment_id,
         "rank": rank,
         "phase": args.phase,
         "results": results,
@@ -516,6 +541,8 @@ def infer(args: argparse.Namespace) -> None:
         "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
         "complete": True,
     }
+    if arm is not None:
+        report["arm"] = arm
     output_root.mkdir(parents=True, exist_ok=True)
     with run_path.open("x") as stream:
         stream.write(json.dumps(report, indent=2) + "\n")
