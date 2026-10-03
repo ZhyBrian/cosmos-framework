@@ -180,7 +180,8 @@ def render_video(path: Path, runs: dict[str, dict], fps: float) -> None:
     process = subprocess.Popen(
         [find_ffmpeg(), "-n", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-s", f"{first.width}x{first.height}", "-r", str(fps), "-i", "pipe:0", "-an",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
+         "-c:v", "libx264", "-preset", "fast", "-crf", "14", "-pix_fmt", "yuv444p",
+         "-movflags", "+faststart", str(path)],
         stdin=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     write_error = None
@@ -231,6 +232,7 @@ def main(argv: list[str] | None = None) -> None:
         "depth_display_range_m": [0, 0.5] if has_depth else None,
         "prediction_depth_policy": "raw predictions scored; display clipping only; no GT masking",
         "poster_frame": 16,
+        "video_encoding": {"codec": "libx264", "pixel_format": "yuv444p", "crf": 14},
     }
     if args.reference_npz:
         with np.load(args.reference_npz, allow_pickle=False) as archive:

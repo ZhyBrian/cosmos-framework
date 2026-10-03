@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 
-from examples.umift.local_backup_compare import compare_reference, depth_pixels, score_runs, validate_runs
+from examples.umift.local_backup_compare import compare_reference, depth_pixels, render_video, score_runs, validate_runs
 
 
 class LocalBackupCompareTest(unittest.TestCase):
@@ -94,6 +96,23 @@ class LocalBackupCompareTest(unittest.TestCase):
         np.testing.assert_array_equal(pred[0, 0], [59, 76, 192])
         np.testing.assert_array_equal(pred[0, -1], [180, 4, 38])
         np.testing.assert_array_equal(depth, original)
+
+    def test_video_preserves_depth_chroma_without_420_subsampling(self):
+        from PIL import Image
+
+        process = Mock()
+        process.poll.return_value = None
+        process.communicate.return_value = (None, b"")
+        process.returncode = 0
+        with patch("examples.umift.local_backup_compare.find_ffmpeg", return_value="ffmpeg"), \
+                patch("examples.umift.local_backup_compare.render_frame", return_value=Image.new("RGB", (2, 2))), \
+                patch("examples.umift.local_backup_compare.subprocess.Popen", return_value=process) as launch:
+            render_video(Path("unused-comparison.mp4"), self.runs(depth=True), 15)
+        command = launch.call_args.args[0]
+        pixel_formats = [command[index + 1] for index, token in enumerate(command) if token == "-pix_fmt"]
+        self.assertEqual(pixel_formats[-1], "yuv444p")
+        self.assertEqual(command[command.index("-crf") + 1], "14")
+        self.assertEqual(process.stdin, None)
 
 
 if __name__ == "__main__":
